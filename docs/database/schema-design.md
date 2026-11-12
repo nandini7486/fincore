@@ -1,7 +1,7 @@
-# FinCore — Database Schema Design (Phase 1)
+﻿# FinCore â€” Database Schema Design (Phase 1)
 
-> **Status:** Proposed — to be agreed before migrations are written.\
-> **Implements:** Blueprint v0.2, §5 and §8.\
+> **Status:** Proposed â€” to be agreed before migrations are written.\
+> **Implements:** Blueprint v0.2, Â§5 and Â§8.\
 > **Target:** PostgreSQL 16.
 
 ## 1. Entity-relationship diagram
@@ -115,7 +115,7 @@ Conventions:
 
 - Primary keys are `uuid DEFAULT gen_random_uuid()` (built into PostgreSQL 13+), except `audit_log`.
 - All timestamps are `timestamptz`, stored in UTC, default `now()`.
-- Enumerations are `text` + `CHECK (... IN (...))` rather than PostgreSQL `ENUM` types — easier to evolve with migrations.
+- Enumerations are `text` + `CHECK (... IN (...))` rather than PostgreSQL `ENUM` types â€” easier to evolve with migrations.
 - Money is `bigint` paise. `currency` is `char(3)`, `CHECK (currency = 'INR')` in V1.
 - `updated_at` is set explicitly by the application in the same statement that changes the row.
 
@@ -124,20 +124,20 @@ Conventions:
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | uuid | PK |
-| `name` | text | NOT NULL, length 1–200 |
+| `name` | text | NOT NULL, length 1â€“200 |
 | `email` | text | NOT NULL; unique on `lower(email)` |
 | `role` | text | NOT NULL, `IN ('USER','ADMIN')`, default `USER` |
 | `api_token_hash` | bytea | NOT NULL, UNIQUE, length 32 |
 | `created_at` | timestamptz | NOT NULL |
 
-**Why `api_token_hash`:** minimal auth for V1 (Blueprint §16 #9). `fincorectl` generates a random token, shows it once, and stores only its SHA-256. On each request the API hashes the bearer token and looks it up by the unique index. A database leak does not reveal usable tokens. Phase 7 replaces this with JWT.
+**Why `api_token_hash`:** minimal auth for V1 (Blueprint Â§16 #9). `fincorectl` generates a random token, shows it once, and stores only its SHA-256. On each request the API hashes the bearer token and looks it up by the unique index. A database leak does not reveal usable tokens. Phase 7 replaces this with JWT.
 
 ### 2.2 `accounts`
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | uuid | PK |
-| `user_id` | uuid | FK → `users(id)`, NULL only for treasury |
+| `user_id` | uuid | FK â†’ `users(id)`, NULL only for treasury |
 | `type` | text | `IN ('USER','TREASURY')` |
 | `currency` | char(3) | `= 'INR'` |
 | `balance` | bigint | NOT NULL, default 0 |
@@ -155,8 +155,8 @@ CHECK (
 
 Indexes:
 
-- `UNIQUE (currency) WHERE type = 'TREASURY'` — exactly one treasury per currency.
-- `(user_id)` — list a user's accounts.
+- `UNIQUE (currency) WHERE type = 'TREASURY'` â€” exactly one treasury per currency.
+- `(user_id)` â€” list a user's accounts.
 
 The `balance >= 0` check is a **second line of defence**: the service checks funds while holding the row lock, and if a bug ever slipped through, the database would refuse the commit.
 
@@ -166,27 +166,27 @@ The `balance >= 0` check is a **second line of defence**: the service checks fun
 |---|---|---|
 | `id` | uuid | PK |
 | `type` | text | `IN ('TRANSFER','TOPUP')` |
-| `sender_account_id` | uuid | NOT NULL, FK → `accounts(id)` |
-| `receiver_account_id` | uuid | NOT NULL, FK → `accounts(id)` |
+| `sender_account_id` | uuid | NOT NULL, FK â†’ `accounts(id)` |
+| `receiver_account_id` | uuid | NOT NULL, FK â†’ `accounts(id)` |
 | `amount` | bigint | NOT NULL, `> 0` |
 | `currency` | char(3) | `= 'INR'` |
 | `status` | text | `IN ('PROCESSING','SUCCESS','FAILED')` |
 | `failure_reason` | text | NULL unless `FAILED` |
-| `initiated_by_user_id` | uuid | NOT NULL, FK → `users(id)` |
+| `initiated_by_user_id` | uuid | NOT NULL, FK â†’ `users(id)` |
 | `request_id` | text | NOT NULL |
 | `created_at`, `updated_at` | timestamptz | NOT NULL |
 
 Table-level checks:
 
 - `sender_account_id <> receiver_account_id`
-- `(status = 'FAILED') = (failure_reason IS NOT NULL)` — a failure always has a reason, a success never has one.
+- `(status = 'FAILED') = (failure_reason IS NOT NULL)` â€” a failure always has a reason, a success never has one.
 
 Indexes (for history, FR-07):
 
 - `(sender_account_id, created_at DESC, id DESC)`
 - `(receiver_account_id, created_at DESC, id DESC)`
 
-**History query** — each branch uses its own index, then merges:
+**History query** â€” each branch uses its own index, then merges:
 
 ```sql
 (SELECT * FROM payments
@@ -200,15 +200,15 @@ ORDER BY created_at DESC, id DESC
 LIMIT $4;
 ```
 
-This replaces the v0.2 blueprint idea of serving history from `ledger_entries`: failed payments have no ledger entries, so the ledger-based query would need a second source anyway. Two payment indexes are simpler and cover both cases. (Blueprint §8.2 updated accordingly.)
+This replaces the v0.2 blueprint idea of serving history from `ledger_entries`: failed payments have no ledger entries, so the ledger-based query would need a second source anyway. Two payment indexes are simpler and cover both cases. (Blueprint Â§8.2 updated accordingly.)
 
 ### 2.4 `ledger_entries`
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | uuid | PK |
-| `payment_id` | uuid | NOT NULL, FK → `payments(id)` |
-| `account_id` | uuid | NOT NULL, FK → `accounts(id)` |
+| `payment_id` | uuid | NOT NULL, FK â†’ `payments(id)` |
+| `account_id` | uuid | NOT NULL, FK â†’ `accounts(id)` |
 | `entry_type` | text | `IN ('DEBIT','CREDIT')` |
 | `amount` | bigint | NOT NULL, `> 0` |
 | `currency` | char(3) | `= 'INR'` |
@@ -216,18 +216,18 @@ This replaces the v0.2 blueprint idea of serving history from `ledger_entries`: 
 
 Constraints and indexes:
 
-- `UNIQUE (payment_id, entry_type)` — at most one DEBIT and one CREDIT per payment. Combined with the transaction always inserting both, this gets us most of the way to "exactly two balanced entries" at the database level. The remaining parts (both present, amounts equal) are checked by reconciliation.
-- `(account_id, created_at, id)` — account statements and per-account reconciliation.
+- `UNIQUE (payment_id, entry_type)` â€” at most one DEBIT and one CREDIT per payment. Combined with the transaction always inserting both, this gets us most of the way to "exactly two balanced entries" at the database level. The remaining parts (both present, amounts equal) are checked by reconciliation.
+- `(account_id, created_at, id)` â€” account statements and per-account reconciliation.
 - **Immutable:** trigger rejects `UPDATE`, `DELETE`, and `TRUNCATE`.
 
 ### 2.5 `idempotency_records`
 
 | Column | Type | Constraints |
 |---|---|---|
-| `user_id` | uuid | PK part 1, FK → `users(id)` |
-| `key` | text | PK part 2, length 1–255 |
+| `user_id` | uuid | PK part 1, FK â†’ `users(id)` |
+| `key` | text | PK part 2, length 1â€“255 |
 | `request_hash` | bytea | NOT NULL, length 32 |
-| `payment_id` | uuid | NULL, FK → `payments(id)` |
+| `payment_id` | uuid | NULL, FK â†’ `payments(id)` |
 | `response_status` | int | NULL |
 | `response_body` | jsonb | NULL |
 | `created_at` | timestamptz | NOT NULL |
@@ -235,7 +235,7 @@ Constraints and indexes:
 
 Index: `(expires_at)` for the cleanup job.
 
-The composite primary key `(user_id, key)` **is** the uniqueness constraint that makes the in-transaction claim work (Blueprint §6.3). The response columns are NULL only inside the claiming transaction; they are filled before commit, so other sessions never see a committed record without a response.
+The composite primary key `(user_id, key)` **is** the uniqueness constraint that makes the in-transaction claim work (Blueprint Â§6.3). The response columns are NULL only inside the claiming transaction; they are filled before commit, so other sessions never see a committed record without a response.
 
 The request hash covers the **operation** (`payment.create` / `topup.create`) plus the canonical body, so the same key reused across endpoints is a `409`, not a replay.
 
@@ -276,14 +276,14 @@ Design choices:
 | `created_at` | timestamptz | NOT NULL |
 | `processed_at` | timestamptz | NULL |
 
-Index: `(next_attempt_at) WHERE processed_at IS NULL` — the worker's polling query only ever scans pending events.
+Index: `(next_attempt_at) WHERE processed_at IS NULL` â€” the worker's polling query only ever scans pending events.
 
 ### 2.8 `notifications` (consumed in Phase 5)
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | uuid | PK |
-| `user_id` | uuid | NOT NULL, FK → `users(id)` |
+| `user_id` | uuid | NOT NULL, FK â†’ `users(id)` |
 | `event_id` | uuid | NOT NULL, UNIQUE |
 | `message` | text | NOT NULL |
 | `created_at` | timestamptz | NOT NULL |
@@ -323,18 +323,18 @@ Two layers protect the ledger and audit log: the app role is never granted `UPDA
 
 | Invariant | Database | Application | Reconciliation |
 |---|---|---|---|
-| No float money | `bigint` columns | `int64` | — |
-| Positive amounts | `CHECK > 0` | validation | — |
-| User balance never negative | `CHECK` | funds check under lock | ✓ |
-| One treasury per currency | partial unique index | — | — |
-| Sender ≠ receiver | `CHECK` | validation | — |
-| Failed ⇔ has reason | `CHECK` | — | — |
-| ≤ 1 debit and ≤ 1 credit per payment | `UNIQUE (payment_id, entry_type)` | — | — |
-| SUCCESS payment has exactly 2 equal entries | — | single transaction | ✓ |
-| Balance = sum of ledger | — | single transaction | ✓ |
-| Global ledger sum = 0 | — | — | ✓ |
-| Ledger and audit immutable | trigger + grants | — | — |
-| Idempotency key unique per user | composite PK | in-transaction claim | — |
+| No float money | `bigint` columns | `int64` | â€” |
+| Positive amounts | `CHECK > 0` | validation | â€” |
+| User balance never negative | `CHECK` | funds check under lock | âœ“ |
+| One treasury per currency | partial unique index | â€” | â€” |
+| Sender â‰  receiver | `CHECK` | validation | â€” |
+| Failed â‡” has reason | `CHECK` | â€” | â€” |
+| â‰¤ 1 debit and â‰¤ 1 credit per payment | `UNIQUE (payment_id, entry_type)` | â€” | â€” |
+| SUCCESS payment has exactly 2 equal entries | â€” | single transaction | âœ“ |
+| Balance = sum of ledger | â€” | single transaction | âœ“ |
+| Global ledger sum = 0 | â€” | â€” | âœ“ |
+| Ledger and audit immutable | trigger + grants | â€” | â€” |
+| Idempotency key unique per user | composite PK | in-transaction claim | â€” |
 
 ## 6. Migration plan
 
@@ -354,7 +354,7 @@ Each file is a `goose` SQL migration with `Up` and `Down` sections.
 
 Phase 1 is done when: migrations apply cleanly up and down on an empty database, CI runs them against a PostgreSQL service container, and a test proves `UPDATE`/`DELETE` on `ledger_entries` and `audit_log` fail.
 
-## 7. Open questions
+## 7. Decisions
 
-1. **App role (§4):** worth the extra setup now, or defer to Phase 7? *Recommendation: now — it is one migration and protects the audit log from day one.*
-2. **`updated_at` maintenance:** application-set (proposed) vs. a trigger. *Recommendation: application-set; fewer hidden behaviours.*
+1. **App role (Â§4):** created in Phase 1 (migration 8), protecting the audit log and ledger from day one.
+2. **`updated_at` maintenance:** set by the application; no trigger.
