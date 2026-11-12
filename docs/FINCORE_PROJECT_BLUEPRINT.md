@@ -782,11 +782,14 @@ verified by the reconciliation command and tests.
 ### 8.2 Indexes
 
 -   `payments(id)` (PK)
--   `ledger_entries(account_id, created_at DESC, id DESC)` --- account
-    history uses ledger entries joined to payments, so one index covers
-    both sent and received payments. Failed payments (no ledger entries)
-    are found via `payments(sender_account_id, created_at DESC, id DESC)`.
--   `ledger_entries(payment_id)`
+-   `payments(sender_account_id, created_at DESC, id DESC)` and
+    `payments(receiver_account_id, created_at DESC, id DESC)` --- account
+    history is a `UNION ALL` of the two keyset queries. This covers
+    `FAILED` payments, which have no ledger entries (see
+    `docs/database/schema-design.md` §2.3).
+-   `ledger_entries(account_id, created_at, id)` for statements and
+    reconciliation
+-   `ledger_entries(payment_id, entry_type)` unique
 -   `idempotency_records(expires_at)` for cleanup
 -   `audit_log(actor_user_id, occurred_at)`,
     `audit_log(resource_type, resource_id)`
