@@ -25,10 +25,19 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ⏳ Next |
 | 3 | Idempotency and concurrency | ⏳ |
 | 4 | Failure injection and test hardening | ⏳ |
-| 5 | Outbox and background worker | ⏳ |
+| 5 | Outbox, background worker, in-app notifications | ⏳ |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
 
-V2 (Phases 7–12): hardened auth, dashboards, Python AI service, React UI. See the blueprint §12.
+V2 (Phases 7–12): hardened auth, dashboards, Python AI service, React UI with
+live notifications (SSE), webhooks. See the blueprint §12.
+
+## Notifications
+
+No external or paid service. A payment writes an event to the PostgreSQL
+**outbox** in the same transaction; a Go worker turns it into an in-app
+notification (`GET /api/v1/notifications`). V2 adds Server-Sent Events,
+webhooks and optional Mailpit email on top of the same worker.
+See [blueprint §8.6](docs/FINCORE_PROJECT_BLUEPRINT.md#86-notifications).
 
 ## What exists today
 
@@ -99,6 +108,8 @@ docs/
 
 ## Changelog
 
+- **Spec — notifications:** outbox → worker → in-app notifications in V1;
+  SSE, webhooks, optional Mailpit email in V2 (blueprint §8.6, decision #11).
 - **Phase 1 — migrations:** 9 goose migrations, `cmd/migrate` CLI, schema
   tests for constraints, append-only triggers and role grants; CI now runs
   against a PostgreSQL service.
