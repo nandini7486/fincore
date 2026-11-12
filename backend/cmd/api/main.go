@@ -1,7 +1,4 @@
 // Command api is the FinCore HTTP API server.
-//
-// Phase 0: only liveness is exposed. Routing (chi), database access (pgx),
-// and the payment endpoints arrive in later phases.
 package main
 
 import (
@@ -13,48 +10,63 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/nandini7486/fincore/backend/internal/httpapi"
+	"github.com/nandini7486/fincore/backend/internal/platform/config"
+	"github.com/nandini7486/fincore/backend/internal/platform/db"
 )
 
-func newRouter() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	return mux
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if err := run(); err != nil {
+		slog.Error("api exited with error", "err", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-	addr := os.Getenv("HTTP_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           newRouter(),
-		ReadHeaderTimeout: 5 * time.Second,
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpapi.NewRouter(httpapi.Deps{DB: pool}),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("api listening", "addr", addr)
+		slog.Info("api listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server failed", "err", err)
-			os.Exit(1)
+			errCh <- err
 		}
+		close(errCh)
 	}()
 
-	<-ctx.Done()
-	logger.Info("shutting down")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "err", err)
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
 	}
+
+	// Graceful shutdown: stop accepting, let in-flight requests (and their
+	// transactions) finish, then the deferred pool.Close runs.
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }

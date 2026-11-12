@@ -685,6 +685,7 @@ no stale "in progress" record to clean up after a crash.
 
 | Method | Endpoint | Purpose | Who |
 |---|---|---|---|
+| `GET` | `/api/v1/me` | The authenticated caller (verify a token) | User |
 | `POST` | `/api/v1/accounts` | Create an account | User |
 | `GET` | `/api/v1/accounts/{account_id}` | Account details and balance | Owner |
 | `POST` | `/api/v1/accounts/{account_id}/topups` | Fund an account from treasury | Admin |
@@ -1062,12 +1063,16 @@ Understanding and correctness take priority over dates.
 
 ## 13. Repository structure
 
+The repository has three top-level areas --- **backend**, **frontend**,
+**devops** --- plus shared `docs/`. `.github/` must stay at the repository
+root because GitHub only reads workflows from there.
+
 ``` text
 fincore/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml
-├── backend/
+│       └── ci.yml              # must live at repo root (GitHub requirement)
+├── backend/                    # Go API, worker, CLIs, migrations
 │   ├── cmd/
 │   │   ├── api/
 │   │   ├── worker/
@@ -1082,23 +1087,23 @@ fincore/
 │   │   ├── outbox/
 │   │   ├── money/              # amount parsing and minor units
 │   │   ├── platform/           # db pool, tx manager, config, logging
+│   │   ├── testutil/           # test databases
 │   │   └── httpapi/            # router, middleware, handlers, errors
-│   ├── migrations/
-│   └── tests/                  # integration and concurrency tests
-├── ai-service/                 # V2
-├── frontend/                   # V2
-├── infrastructure/
-│   ├── docker/
-│   └── monitoring/             # V2
+│   └── migrations/
+├── frontend/                   # React + TypeScript dashboard (V2)
+├── devops/                     # everything to run and operate FinCore
+│   ├── docker-compose.yml      # local stack (PostgreSQL now; API, worker later)
+│   ├── .env.example            # compose/env template; .env is git-ignored
+│   ├── docker/                 # Dockerfiles (Phase 6)
+│   ├── monitoring/             # Prometheus/Grafana config (V2)
+│   └── scripts/                # ops helper scripts
+├── ai-service/                 # Python AI service (V2)
 ├── docs/
 │   ├── architecture/
 │   ├── api/
 │   ├── database/
 │   ├── decisions/              # ADRs: one file per significant decision
 │   └── performance/
-├── scripts/
-├── .env.example
-├── docker-compose.yml
 └── README.md
 ```
 
@@ -1152,7 +1157,7 @@ Do not accept generated code that you cannot explain or test.
 -   Automated tests cover normal, invalid, duplicate, concurrent, and
     failure paths, and run in CI.
 -   The project starts locally with documented instructions
-    (`docker compose up`).
+    (`docker compose -f devops/docker-compose.yml up`).
 -   Logs, audit records, and basic metrics make failures diagnosable.
 -   Performance results are measured and documented.
 -   The developer can explain the transaction boundary, locking,
