@@ -1,0 +1,17 @@
+# Environment and secrets
+.env
+*.pem
+*.key
+
+# Go
+/backend/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
