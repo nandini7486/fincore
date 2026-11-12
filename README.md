@@ -92,8 +92,8 @@ See [blueprint §8.6](docs/FINCORE_PROJECT_BLUEPRINT.md#86-notifications).
 ## Run locally
 
 ```sh
-cp .env.example .env                 # adjust values if needed
-docker compose up -d postgres        # start PostgreSQL
+cp devops/.env.example devops/.env                          # adjust values if needed
+docker compose -f devops/docker-compose.yml up -d postgres  # start PostgreSQL
 
 cd backend
 export DATABASE_URL=postgres://fincore:fincore_local_dev@localhost:5432/fincore?sslmode=disable
@@ -146,6 +146,18 @@ on every push and pull request.
 
 ## Repository layout
 
+The repo has three areas — **backend**, **frontend**, **devops** — plus
+shared docs. `.github/` stays at the root because GitHub only reads
+workflows from there.
+
+| Folder | Contents | State |
+|---|---|---|
+| [`backend/`](backend) | Go API, CLIs, migrations, tests | Active |
+| [`frontend/`](frontend) | React + TypeScript dashboard | Planned (V2) |
+| [`devops/`](devops) | Docker Compose, env template; later Dockerfiles, monitoring | Active |
+| [`docs/`](docs) | Blueprint, schema design, decisions | Active |
+| [`.github/`](.github) | CI workflow | Active |
+
 ```text
 backend/
   cmd/api/              HTTP API server
@@ -159,13 +171,19 @@ backend/
     platform/           config, db (pool, WithTx), httpx (JSON/errors), reqctx
     testutil/testdb/    Per-package throwaway test databases
   migrations/           goose SQL migrations (embedded) + schema tests
+frontend/               React + TypeScript dashboard (V2, placeholder)
+devops/
+  docker-compose.yml    Local PostgreSQL
+  .env.example          Template for devops/.env (git-ignored)
 docs/
   database/             Schema design
-.github/                CI workflow
+.github/workflows/      CI
 ```
 
 ## Changelog
 
+- **Repo layout:** split into `backend/`, `frontend/` and `devops/`;
+  `docker-compose.yml` and `.env.example` moved to `devops/`; CI and docs updated.
 - **Phase 2a — API foundation:** config, pgx pool and `WithTx`, chi router,
   request IDs, JSON error envelope, access logging, panic recovery, `/readyz`,
   bearer-token auth with audited failures, `RequireRole`, audit writer,

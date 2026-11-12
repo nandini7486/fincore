@@ -61,5 +61,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate docker-compose.yml
-        run: docker compose config --quiet
+      - name: Validate devops/docker-compose.yml
+        run: docker compose -f devops/docker-compose.yml config --quiet
