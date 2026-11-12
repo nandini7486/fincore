@@ -693,6 +693,7 @@ no stale "in progress" record to clean up after a crash.
 | `GET` | `/api/v1/accounts/{account_id}/payments` | Payment history (cursor) | Owner |
 | `GET` | `/healthz` | Liveness | Public |
 | `GET` | `/readyz` | Readiness (DB reachable) | Public |
+| `GET` | `/api/v1/notifications` | Caller's notifications (cursor) | User |
 | `GET` | `/metrics` | Prometheus metrics | Internal |
 
 ### Successful payment response
@@ -861,6 +862,41 @@ Debits equal credits per payment; the global ledger sum is zero.
     consumer must be idempotent (unique on event ID).
 -   Same worker process runs the idempotency-record cleanup job.
 
+### 8.6 Notifications
+
+No external or paid notification service. Notifications are built on the
+outbox, so adding a delivery channel never touches the payment code.
+
+**V1 --- in-app (Phase 5):**
+
+``` text
+Payment commits ──► outbox_events row (same transaction)
+                         │
+              Go worker polls (~1 s, SKIP LOCKED)
+                         │
+                         ▼
+              notifications row ("You received ₹2,000 from Alice")
+                         │
+                         ▼
+              GET /api/v1/notifications
+```
+
+-   Never lost: the event is committed atomically with the payment.
+-   Never duplicated: `UNIQUE (event_id)` + `ON CONFLICT DO NOTHING`.
+-   `GET /api/v1/notifications?limit=20&cursor=...` returns the caller's
+    notifications, newest first.
+
+**V2 --- delivery channels (all free, all fed by the same worker):**
+
+| Channel | Tool | Purpose |
+|---|---|---|
+| Live dashboard updates | Server-Sent Events from the Go API | Instant "money received" in the React app |
+| Webhooks | Go worker `POST` to a user-registered URL | Merchant-style callbacks; HMAC signatures, retries with backoff |
+| Email (optional) | Mailpit (local SMTP catcher) | Learn SMTP; no real email ever leaves the machine |
+| Fan-out (optional) | NATS JetStream | Only if several services consume the same events |
+
+Paid providers (Twilio, SendGrid, Firebase) are out of scope.
+
 ------------------------------------------------------------------------
 
 ## 9. AI intelligence service --- V2
@@ -1008,7 +1044,7 @@ Understanding and correctness take priority over dates.
 | 2 | Go API, minimal auth, accounts, top-ups, payments, ledger, audit log, structured logging | Working API with unit + integration tests from day one |
 | 3 | Idempotency and concurrency | In-transaction claim, row locking, concurrency tests, reconciliation command |
 | 4 | Failure injection and test hardening | Failure tests; every status code covered |
-| 5 | Outbox and background worker | Reliable event handoff, notifications consumer, idempotency cleanup |
+| 5 | Outbox and background worker | Reliable event handoff, in-app notifications + `GET /notifications`, idempotency cleanup |
 | 6 | Docker image, metrics endpoint, k6 load test, docs | Multi-stage build, baseline performance report, V1 release |
 
 ### V2
@@ -1019,8 +1055,8 @@ Understanding and correctness take priority over dates.
 | 8 | Prometheus + Grafana | Dashboards and alerts |
 | 9 | Python fundamentals and FastAPI | Separate Python service |
 | 10 | Data analysis and anomaly detection | First ML capability |
-| 11 | React + TypeScript | Working dashboard |
-| 12 | Optional NATS, optional hosted deployment | Event-driven experiment, deployment write-up |
+| 11 | React + TypeScript, Server-Sent Events | Working dashboard with live notifications |
+| 12 | Webhooks, optional Mailpit email, optional NATS, optional hosted deployment | Notification channels, event-driven experiment, deployment write-up |
 
 ------------------------------------------------------------------------
 
@@ -1138,6 +1174,7 @@ Do not accept generated code that you cannot explain or test.
 | 8 | Audit log | Mandatory in V1; append-only table; money actions audited in the same transaction |
 | 9 | Auth | Minimal bearer tokens from Phase 2; hardened JWT in V2 |
 | 10 | Tooling | chi, pgx v5, goose, slog, testcontainers-go, Docker Desktop on WSL2, GitHub Actions |
+| 11 | Notifications | V1: outbox → Go worker → in-app `notifications` table. V2: SSE, webhooks, optional Mailpit email. No paid providers |
 
 Changes to these decisions are recorded as ADRs in `docs/decisions/`.
 
