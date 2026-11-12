@@ -685,6 +685,7 @@ no stale "in progress" record to clean up after a crash.
 
 | Method | Endpoint | Purpose | Who |
 |---|---|---|---|
+| `GET` | `/api/v1/me` | The authenticated caller (verify a token) | User |
 | `POST` | `/api/v1/accounts` | Create an account | User |
 | `GET` | `/api/v1/accounts/{account_id}` | Account details and balance | Owner |
 | `POST` | `/api/v1/accounts/{account_id}/topups` | Fund an account from treasury | Admin |
