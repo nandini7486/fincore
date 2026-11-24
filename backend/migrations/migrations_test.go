@@ -287,3 +287,60 @@ func wantSQLState(t *testing.T, err error, code string) {
 		t.Fatalf("SQLSTATE = %s (%s), want %s", pgErr.Code, pgErr.Message, code)
 	}
 }
+
+// Once money has moved, rolling back past the treasury seed must refuse with
+// a clear message and leave every table and row in place.
+func TestRollbackRefusedAfterMoneyMoved(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p, err := migrations.NewProvider(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A user, an account and one top-up from the treasury.
+	if _, err := db.ExecContext(ctx, `
+		WITH u AS (
+			INSERT INTO users (name, email, role, api_token_hash)
+			VALUES ('A', 'a@example.com', 'USER', decode(repeat('ab', 32), 'hex')) RETURNING id
+		), a AS (
+			INSERT INTO accounts (user_id, type, currency) SELECT id, 'USER', 'INR' FROM u RETURNING id, user_id
+		)
+		INSERT INTO payments (type, sender_account_id, receiver_account_id, amount, currency, status,
+		                      initiated_by_user_id, request_id)
+		SELECT 'TOPUP', (SELECT id FROM accounts WHERE type = 'TREASURY'), a.id, 100, 'INR', 'SUCCESS',
+		       a.user_id, 'req_test'
+		FROM a`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.DownTo(ctx, 0)
+	if err == nil || !strings.Contains(err.Error(), "refusing to remove the INR treasury: 1 payment(s) reference it") {
+		t.Fatalf("rollback err = %v, want a clear refusal", err)
+	}
+
+	// Nothing was rolled back: still at the latest version, data intact.
+	version, err := p.GetDBVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 9 {
+		t.Fatalf("database version = %d after refused rollback, want 9", version)
+	}
+	var payments, treasuries int
+	if err := db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM payments), (SELECT count(*) FROM accounts WHERE type = 'TREASURY')`).Scan(&payments, &treasuries); err != nil {
+		t.Fatal(err)
+	}
+	if payments != 1 || treasuries != 1 {
+		t.Fatalf("after refused rollback: payments=%d treasuries=%d, want 1 and 1", payments, treasuries)
+	}
+}
