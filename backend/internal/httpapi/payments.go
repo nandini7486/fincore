@@ -132,7 +132,20 @@ func createPayment(p Pool) http.HandlerFunc {
 		})
 		switch {
 		case errors.Is(err, payments.ErrSenderNotFound):
-			// Same 404 as GET /accounts/{id}: never reveal someone else's account.
+			// Same 404 as GET /accounts/{id}: never reveal someone else's
+			// account. A real account owned by someone else is still audited.
+			if errors.Is(err, payments.ErrSenderNotOwned) {
+				actor := id.UserID
+				audit.WriteBestEffort(r.Context(), p, audit.Entry{
+					ActorUserID:  &actor,
+					Action:       "authz.denied",
+					ResourceType: "account",
+					ResourceID:   req.SenderAccountID,
+					Outcome:      audit.Denied,
+					IPAddress:    httpx.ClientIP(r),
+					Details:      map[string]any{"method": r.Method, "path": r.URL.Path},
+				})
+			}
 			httpx.WriteError(w, r, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "Sender account not found.")
 		case errors.Is(err, payments.ErrReceiverNotFound):
 			httpx.WriteError(w, r, http.StatusUnprocessableEntity, "RECEIVER_NOT_FOUND", "Receiver account not found.")

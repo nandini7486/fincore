@@ -171,12 +171,30 @@ func TestPayments(t *testing.T) {
 		}
 	})
 
-	t.Run("someone else's sender account is 404", func(t *testing.T) {
-		r := m.pay(t, m.bobToken, m.aliceAcct, m.bobAcct, "1.00")
-		if r.code != http.StatusNotFound || r.errCode != "ACCOUNT_NOT_FOUND" {
-			t.Fatalf("got %d %s", r.code, r.errCode)
-		}
-	})
+	// Same 404 either way; only a real account owned by someone else (or
+	// the treasury) is audited as authz.denied.
+	for _, tc := range []struct {
+		name, from string
+		audited    bool
+	}{
+		{"someone else's sender account", m.aliceAcct, true},
+		{"treasury as sender", m.treasury, true},
+		{"missing sender account", "00000000-0000-4000-8000-000000000000", false},
+	} {
+		t.Run(tc.name+" is 404", func(t *testing.T) {
+			r := m.pay(t, m.bobToken, tc.from, m.bobAcct, "1.00")
+			if r.code != http.StatusNotFound || r.errCode != "ACCOUNT_NOT_FOUND" {
+				t.Fatalf("got %d %s", r.code, r.errCode)
+			}
+			want := 0
+			if tc.audited {
+				want = 1
+			}
+			if n := m.auditCount(t, "authz.denied", r.requestID); n != want {
+				t.Fatalf("authz.denied audit records = %d, want %d", n, want)
+			}
+		})
+	}
 
 	t.Run("unknown receiver is 422", func(t *testing.T) {
 		r := m.pay(t, m.aliceToken, m.aliceAcct, "00000000-0000-4000-8000-000000000000", "1.00")

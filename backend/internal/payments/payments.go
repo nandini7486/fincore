@@ -55,6 +55,12 @@ var (
 	ErrBusy = errors.New("database busy")
 )
 
+// ErrSenderNotOwned is the case of ErrSenderNotFound where the account
+// exists but the caller may not spend from it. errors.Is(err,
+// ErrSenderNotFound) is true for it, so clients get the same 404; the API
+// additionally audits it as authz.denied (ADR 0001).
+var ErrSenderNotOwned = fmt.Errorf("%w: owned by another user", ErrSenderNotFound)
+
 // RuleError is a business-rule failure (FR-08). The FAILED payment has been
 // written to the transaction, which the caller should still commit.
 type RuleError struct {
@@ -170,8 +176,11 @@ func execute(ctx context.Context, tx pgx.Tx, r Request, senderAllowed func(locke
 	}
 
 	sender, ok := locked[r.SenderID]
-	if !ok || !senderAllowed(sender) {
+	if !ok {
 		return Payment{}, ErrSenderNotFound
+	}
+	if !senderAllowed(sender) {
+		return Payment{}, ErrSenderNotOwned
 	}
 	receiver, ok := locked[r.ReceiverID]
 	if !ok || receiver.typ != "USER" {
