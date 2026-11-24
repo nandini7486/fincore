@@ -50,6 +50,8 @@ func NewRouter(d Deps) http.Handler {
 		r.With(auth.RequireRole(d.DB, auth.RoleAdmin)).
 			Post("/accounts/{accountID}/topups", createTopUp(d.DB))
 		r.Post("/payments", createPayment(d.DB))
+		r.Get("/payments/{paymentID}", getPayment(d.DB))
+		r.Get("/accounts/{accountID}/payments", accountPayments(d.DB))
 	})
 
 	return r

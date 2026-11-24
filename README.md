@@ -23,7 +23,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 |---|---|---|
 | 0 | Repo, Go module, Compose, CI | ✅ Done |
 | 1 | PostgreSQL schema and migrations | ✅ Done |
-| 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | 🚧 In progress |
+| 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
 | 3 | Idempotency and concurrency | ⏳ |
 | 4 | Failure injection and test hardening | ⏳ |
 | 5 | Outbox, background worker, in-app notifications | ⏳ |
@@ -35,8 +35,8 @@ Phase 2 is delivered in four PRs:
 |---|---|---|
 | 2a | API foundation: config, DB pool, router, request IDs, errors, logging, `/readyz`, token auth, audit writer, `fincorectl` | ✅ Done |
 | 2b | Accounts: create and get | ✅ Done |
-| 2c | Money parsing, top-ups, payments, ledger | 🚧 In review |
-| 2d | Payment details and account history (cursor pagination) | ⏳ |
+| 2c | Money parsing, top-ups, payments, ledger | ✅ Done |
+| 2d | Payment details and account history (cursor pagination) | ✅ Done |
 
 V2 (Phases 7–12): hardened auth, dashboards, Python AI service, React UI with
 live notifications (SSE), webhooks. See the blueprint §12.
@@ -127,6 +127,8 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 | `GET` | `/api/v1/accounts/{account_id}` | Bearer token, owner only | Account details and balance |
 | `POST` | `/api/v1/accounts/{account_id}/topups` | Bearer token, **admin** | Fund an account from the treasury |
 | `POST` | `/api/v1/payments` | Bearer token, sender owner | Transfer between accounts |
+| `GET` | `/api/v1/payments/{payment_id}` | Bearer token, sender or receiver owner | Payment details (incl. `failure_reason`) |
+| `GET` | `/api/v1/accounts/{account_id}/payments?limit=&cursor=` | Bearer token, owner only | Payment history, newest first |
 
 - Every response carries an `X-Request-ID` (client-supplied if well-formed,
   otherwise generated). The same ID appears in logs, error bodies and audit records.
@@ -153,6 +155,15 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 - Top-ups move money from the treasury, the only account allowed to go
   negative. Its balance equals the money issued.
 - `Idempotency-Key` handling arrives in Phase 3.
+
+**History**
+
+- Sent and received payments, including `FAILED` ones, newest first.
+- **Keyset pagination** on `(created_at, id)`: follow `next_cursor` until it is
+  `null`. Pages stay correct while new payments arrive, and a deep page costs
+  the same as the first (two index scans, ~0.3 ms on 200k payments). See
+  [ADR 0002](docs/decisions/0002-keyset-pagination-for-history.md).
+- `limit` 1-100 (default 20); invalid `limit` or `cursor` returns `400`.
 
 **Authentication (V1)**
 
@@ -211,6 +222,8 @@ curl -X POST -H "Authorization: Bearer <admin_token>" -H 'Content-Type: applicat
 curl -X POST -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
      -d '{"sender_account_id":"<from>","receiver_account_id":"<to>","amount":"2000.00","currency":"INR"}' \
      http://localhost:8080/api/v1/payments
+# history (then add &cursor=<next_cursor> for the next page)
+curl -H "Authorization: Bearer <token>" "http://localhost:8080/api/v1/accounts/<account_id>/payments?limit=20"
 ```
 
 PowerShell: use `$env:DATABASE_URL = "postgres://..."` instead of `export`.
@@ -275,9 +288,9 @@ backend/
     auth/               Bearer-token auth, identity, role checks
     httpapi/            Router, middleware, handlers
     money/              Minor units <-> decimal strings (no floats)
-    payments/           Transfers, top-ups, ledger entries (one transaction each)
+    payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
     users/              User creation
-    platform/           config, db (pool, WithTx), httpx (JSON/errors), reqctx
+    platform/           config, db (pool, WithTx), httpx (JSON/errors), ids, reqctx
     testutil/testdb/    Per-package throwaway test databases
   migrations/           goose SQL migrations (embedded) + schema tests
 frontend/               React + TypeScript dashboard (V2, placeholder)
@@ -292,6 +305,12 @@ docs/
 
 ## Changelog
 
+- **Phase 2d — reading payments:** `GET /api/v1/payments/{id}` (sender or
+  receiver owner) and `GET /api/v1/accounts/{id}/payments` with keyset
+  pagination and an opaque cursor ([ADR 0002](docs/decisions/0002-keyset-pagination-for-history.md));
+  `failure_reason` in payment responses; shared `ids.IsUUID`,
+  `ownedAccount` and `auditDenied` helpers. Tests cover gaps, duplicates,
+  timestamp ties and payments arriving mid-scroll. Phase 2 complete.
 - **Phase 2c — money movement:** strict `money.Parse` (fuzz-tested round trip),
   `POST /api/v1/payments` and admin `POST /api/v1/accounts/{id}/topups`;
   ordered row locks, rules checked under lock, double-entry ledger, `FAILED`
