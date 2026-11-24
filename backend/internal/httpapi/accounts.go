@@ -14,6 +14,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/money"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
 	"github.com/nandini7486/fincore/backend/internal/platform/httpx"
+	"github.com/nandini7486/fincore/backend/internal/platform/ids"
 )
 
 // maxAccountBodyBytes caps the create-account request body. The only field
@@ -86,62 +87,56 @@ func createAccount(p Pool) http.HandlerFunc {
 // IDs exist (see docs/decisions/0001).
 func getAccount(p Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, _ := auth.FromContext(r.Context())
-		accountID := chi.URLParam(r, "accountID")
-
-		notFound := func() {
-			httpx.WriteError(w, r, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "Account not found.")
-		}
-		if !isUUID(accountID) {
-			notFound()
-			return
-		}
-
-		acct, err := accounts.GetForOwner(r.Context(), p, accountID, id.UserID)
-		switch {
-		case errors.Is(err, accounts.ErrNotFound):
-			notFound()
-		case errors.Is(err, accounts.ErrNotOwner):
-			// The account exists but is not the caller's: worth a security
-			// record, but the client sees exactly the same 404.
-			actor := id.UserID
-			audit.WriteBestEffort(r.Context(), p, audit.Entry{
-				ActorUserID:  &actor,
-				Action:       "authz.denied",
-				ResourceType: "account",
-				ResourceID:   accountID,
-				Outcome:      audit.Denied,
-				IPAddress:    httpx.ClientIP(r),
-				Details:      map[string]any{"method": r.Method, "path": r.URL.Path},
-			})
-			notFound()
-		case err != nil:
-			httpx.WriteInternalError(w, r, err)
-		default:
+		if acct, ok := ownedAccount(w, r, p); ok {
 			httpx.WriteJSON(w, http.StatusOK, toAccountResponse(acct))
 		}
 	}
 }
 
-// isUUID reports whether s is a canonical UUID (8-4-4-4-12 hex digits).
-// Checking before querying keeps malformed IDs from reaching PostgreSQL,
-// which would otherwise reject them with an error.
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
+// ownedAccount loads the {accountID} path account if the caller owns it.
+// Otherwise it writes the uniform 404 (auditing real accounts owned by
+// someone else) and returns false; the handler must then stop.
+func ownedAccount(w http.ResponseWriter, r *http.Request, p Pool) (accounts.Account, bool) {
+	id, _ := auth.FromContext(r.Context())
+	accountID := chi.URLParam(r, "accountID")
+
+	notFound := func() {
+		httpx.WriteError(w, r, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "Account not found.")
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
-				return false
-			}
-		}
+	if !ids.IsUUID(accountID) {
+		notFound()
+		return accounts.Account{}, false
 	}
-	return true
+
+	acct, err := accounts.GetForOwner(r.Context(), p, accountID, id.UserID)
+	switch {
+	case errors.Is(err, accounts.ErrNotFound):
+		notFound()
+	case errors.Is(err, accounts.ErrNotOwner):
+		// The account exists but is not the caller's: worth a security
+		// record, but the client sees exactly the same 404.
+		auditDenied(r, p, "account", accountID)
+		notFound()
+	case err != nil:
+		httpx.WriteInternalError(w, r, err)
+	default:
+		return acct, true
+	}
+	return accounts.Account{}, false
+}
+
+// auditDenied records (best effort) that the caller tried to reach a real
+// resource they may not see. The client is told nothing beyond a 404.
+func auditDenied(r *http.Request, p Pool, resourceType, resourceID string) {
+	id, _ := auth.FromContext(r.Context())
+	actor := id.UserID
+	audit.WriteBestEffort(r.Context(), p, audit.Entry{
+		ActorUserID:  &actor,
+		Action:       "authz.denied",
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Outcome:      audit.Denied,
+		IPAddress:    httpx.ClientIP(r),
+		Details:      map[string]any{"method": r.Method, "path": r.URL.Path},
+	})
 }

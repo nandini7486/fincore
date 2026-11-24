@@ -15,6 +15,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/payments"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
 	"github.com/nandini7486/fincore/backend/internal/platform/httpx"
+	"github.com/nandini7486/fincore/backend/internal/platform/ids"
 	"github.com/nandini7486/fincore/backend/internal/platform/reqctx"
 )
 
@@ -29,6 +30,7 @@ type paymentResponse struct {
 	Amount            string    `json:"amount"`
 	Currency          string    `json:"currency"`
 	Status            string    `json:"status"`
+	FailureReason     *string   `json:"failure_reason,omitempty"` // FAILED payments only
 	CreatedAt         time.Time `json:"created_at"`
 }
 
@@ -41,6 +43,7 @@ func toPaymentResponse(p payments.Payment) paymentResponse {
 		Amount:            money.Format(p.Amount),
 		Currency:          p.Currency,
 		Status:            p.Status,
+		FailureReason:     p.FailureReason,
 		CreatedAt:         p.CreatedAt.UTC(),
 	}
 }
@@ -105,7 +108,7 @@ func createPayment(p Pool) http.HandlerFunc {
 				"Request body must be a JSON object with sender_account_id, receiver_account_id, amount and currency."})
 			return
 		}
-		if !isUUID(req.SenderAccountID) || !isUUID(req.ReceiverAccountID) {
+		if !ids.IsUUID(req.SenderAccountID) || !ids.IsUUID(req.ReceiverAccountID) {
 			rejectInvalid(w, r, p, id.UserID, &validationError{"INVALID_ACCOUNT_ID",
 				"sender_account_id and receiver_account_id must be account IDs."})
 			return
@@ -135,16 +138,7 @@ func createPayment(p Pool) http.HandlerFunc {
 			// Same 404 as GET /accounts/{id}: never reveal someone else's
 			// account. A real account owned by someone else is still audited.
 			if errors.Is(err, payments.ErrSenderNotOwned) {
-				actor := id.UserID
-				audit.WriteBestEffort(r.Context(), p, audit.Entry{
-					ActorUserID:  &actor,
-					Action:       "authz.denied",
-					ResourceType: "account",
-					ResourceID:   req.SenderAccountID,
-					Outcome:      audit.Denied,
-					IPAddress:    httpx.ClientIP(r),
-					Details:      map[string]any{"method": r.Method, "path": r.URL.Path},
-				})
+				auditDenied(r, p, "account", req.SenderAccountID)
 			}
 			httpx.WriteError(w, r, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "Sender account not found.")
 		case errors.Is(err, payments.ErrReceiverNotFound):
@@ -168,7 +162,7 @@ func createTopUp(p Pool) http.HandlerFunc {
 				"Request body must be a JSON object with amount and currency."})
 			return
 		}
-		if !isUUID(accountID) {
+		if !ids.IsUUID(accountID) {
 			httpx.WriteError(w, r, http.StatusNotFound, "ACCOUNT_NOT_FOUND", "Account not found.")
 			return
 		}
