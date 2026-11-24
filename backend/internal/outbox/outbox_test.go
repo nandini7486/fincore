@@ -241,19 +241,51 @@ func TestPoisonEventsDoNotBlockOthers(t *testing.T) {
 	}
 }
 
-// Several workers draining at once (SKIP LOCKED): every event is delivered
-// exactly once, none twice, none skipped.
+// Several workers draining at once must each take a DIFFERENT event at the
+// same time (FOR UPDATE SKIP LOCKED), and every event must be delivered
+// exactly once.
+//
+// The concurrency is forced, not hoped for: each handler holds its event
+// until all workers are holding one simultaneously. That can only happen if
+// the workers skip each other's locked rows. With plain FOR UPDATE they
+// would queue behind the first worker's row instead, the barrier would never
+// fill, and the test fails after 3 seconds.
 func TestCompetingWorkersDeliverEachEventOnce(t *testing.T) {
 	tdb := setup(t)
 	const events, workers = 300, 6
 	write(t, tdb, "x.happened", events)
+
+	var (
+		inFlight   atomic.Int32 // handlers currently holding an event
+		allHeld    atomic.Bool  // all workers held an event at the same moment
+		release    = make(chan struct{})
+		releaseOne sync.Once
+	)
+	handler := func(worker int) outbox.Handler {
+		return func(ctx context.Context, tx pgx.Tx, e outbox.Event) error {
+			if err := record(worker)(ctx, tx, e); err != nil {
+				return err
+			}
+			if inFlight.Add(1) == workers {
+				allHeld.Store(true)
+				releaseOne.Do(func() { close(release) })
+			}
+			defer inFlight.Add(-1)
+			select {
+			case <-release:
+			case <-time.After(3 * time.Second):
+				releaseOne.Do(func() { close(release) }) // give up; the assertion below fails
+			}
+			return nil
+		}
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := &outbox.Worker{DB: tdb.App, Handlers: map[string]outbox.Handler{"x.happened": record(i)}}
+			w := &outbox.Worker{DB: tdb.App, Handlers: map[string]outbox.Handler{"x.happened": handler(i)}}
 			if _, err := w.Drain(context.Background()); err != nil {
 				t.Errorf("worker %d: %v", i, err)
 			}
@@ -261,17 +293,20 @@ func TestCompetingWorkersDeliverEachEventOnce(t *testing.T) {
 	}
 	wg.Wait()
 
+	if !allHeld.Load() {
+		t.Fatalf("the %d workers never held %d different events at once: they blocked on each other's locks (is SKIP LOCKED missing?)", workers, workers)
+	}
+	if n := count(t, tdb, `SELECT count(DISTINCT worker) FROM test_deliveries`); n != workers {
+		t.Fatalf("%d workers delivered events, want all %d", n, workers)
+	}
 	if n := count(t, tdb, `SELECT count(*) FROM test_deliveries`); n != events {
 		t.Fatalf("deliveries = %d, want %d", n, events)
 	}
 	if n := count(t, tdb, `SELECT count(DISTINCT event_id) FROM test_deliveries`); n != events {
-		t.Fatalf("distinct events delivered = %d, want %d", n, events)
+		t.Fatalf("distinct events delivered = %d, want %d (an event was delivered twice)", n, events)
 	}
 	if n := count(t, tdb, `SELECT count(*) FROM outbox_events WHERE processed_at IS NULL`); n != 0 {
 		t.Fatalf("pending events = %d, want 0", n)
-	}
-	if n := count(t, tdb, `SELECT count(DISTINCT worker) FROM test_deliveries`); n < 2 {
-		t.Logf("note: only %d worker(s) got events; the work was not shared this run", n)
 	}
 }
 

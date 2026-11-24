@@ -104,8 +104,12 @@ code on purpose and confirming they fail (mutation testing):
 | Notification insert without `ON CONFLICT DO NOTHING` | redelivery test (consumer not idempotent) |
 | No rollback of a failed handler's writes | retry test (the failed attempt's write survived) |
 | Outbox event written for failed payments too | event test (an event for money that never moved) |
+| Worker query without `SKIP LOCKED` | competing-workers test (workers queue behind one lock instead of taking different events) |
 
 One lesson is recorded in [ADR 0003](decisions/0003-idempotency-claim-inside-the-transaction.md):
 a concurrency test that relies on random timing caught the naive idempotency
 bug only 4 times in 30, so concurrency tests here force the interleaving
 (by holding a lock) instead of hoping for it.
+The competing-workers test was first written the hopeful way and still passed
+with `SKIP LOCKED` removed; it now holds every worker at a barrier until all of
+them have an event at once, which only `SKIP LOCKED` makes possible.

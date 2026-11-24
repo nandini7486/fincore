@@ -58,7 +58,8 @@ later webhooks, emails and the AI service. Doing them inside the request is a
   ones, none after any injected failure or a `kill -9` of the API.
 - Worker tests: delivery and marking; retry with backoff after a failure,
   with the failed handler's writes rolled back; panicking and unknown events
-  do not block others; 6 competing workers deliver 300 events exactly once;
+  do not block others; 6 competing workers each hold a different event at
+  the same moment and deliver 300 events exactly once;
   a connection killed mid-handler leaves no trace and the event is
   redelivered once; `Run` keeps polling until cancelled.
 - Notifications: correct messages for the receiver only (Indian digit
@@ -67,4 +68,6 @@ later webhooks, emails and the AI service. Doing them inside the request is a
 - Process test of the real worker binary: delivers notifications, cleans up
   expired keys, exits 0 on `SIGTERM`.
 - Mutations caught: non-idempotent consumer, failed handler's writes kept,
-  events written for failed payments.
+  events written for failed payments, and `SKIP LOCKED` removed (the
+  competing-workers test holds all 6 workers at a barrier until each has a
+  different event at the same moment, which is impossible without it).
