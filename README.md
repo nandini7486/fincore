@@ -26,7 +26,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 1 | PostgreSQL schema and migrations | ✅ Done |
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
 | 3 | Idempotency and concurrency | ✅ Done |
-| 4 | Failure injection and test hardening | 🚧 In progress (4a in review) |
+| 4 | Failure injection and test hardening | ✅ Done |
 | 5 | Outbox, background worker, in-app notifications | ⏳ |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
 
@@ -351,6 +351,10 @@ docs/
 
 ## Changelog
 
+- **Phase 4b — process failures:** tests that build and run the real API
+  binary: `kill -9` mid-payment (rolled back; after restart the same key
+  charges once) and `SIGTERM` mid-payment (new connections refused, the
+  in-flight payment commits, exit 0). Phase 4 complete.
 - **Phase 4a — failure injection:** tests that break audit and ledger writes,
   kill the database connection and disconnect the client mid-payment, each
   proving nothing partial survives and the retry charges once; client
