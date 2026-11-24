@@ -102,3 +102,28 @@ func Format(minor int64) string {
 	b.WriteString(strconv.FormatUint(frac, 10))
 	return b.String()
 }
+
+// FormatINR renders minor units for people, with the rupee sign and Indian
+// digit grouping (thousands, then lakhs and crores in pairs):
+// 200000 -> "₹2,000.00", 1234567890 -> "₹1,23,45,678.90".
+// Use Format, not this, in the API: clients parse plain decimals.
+func FormatINR(minor int64) string {
+	plain := Format(minor) // "-1234567.89"
+	sign := ""
+	if strings.HasPrefix(plain, "-") {
+		sign, plain = "-", plain[1:]
+	}
+	whole, frac, _ := strings.Cut(plain, ".")
+
+	var groups []string
+	if len(whole) > 3 {
+		groups = append(groups, whole[len(whole)-3:])
+		whole = whole[:len(whole)-3]
+		for len(whole) > 2 {
+			groups = append([]string{whole[len(whole)-2:]}, groups...)
+			whole = whole[:len(whole)-2]
+		}
+	}
+	groups = append([]string{whole}, groups...)
+	return sign + "₹" + strings.Join(groups, ",") + "." + frac
+}

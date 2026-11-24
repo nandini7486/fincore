@@ -40,7 +40,8 @@ CI runs 1-4 on every push and pull request.
 | Security | `httpapi/security_test.go` | Every registered route requires a bearer token; admin routes return 403 to users |
 | Concurrency | `payments`, `httpapi/idempotency_test.go`, `httpapi/stress_test.go` | No overdraft, no deadlock, duplicates move money once |
 | Failure | `httpapi/failure_test.go`, `payments` lock-timeout test | Nothing partial survives a failure; retries are safe |
-| Process | `cmd/api/process_test.go` | The real binary killed or shut down mid-payment behaves correctly |
+| Outbox and worker | `outbox`, `notifications`, `payments/events_test.go` | Events exist iff money moved; delivery, retries, competing workers, crash redelivery, idempotent consumer |
+| Process | `cmd/api/process_test.go`, `cmd/worker/process_test.go` | The real binaries killed or shut down mid-work behave correctly |
 | Reconciliation | `reconcile`, plus after every payments test | The books balance; five corruption types are caught |
 | End-to-end | `scripts/smoke.sh` | The real binaries work together |
 
@@ -61,6 +62,9 @@ with the same `Idempotency-Key` and expects a fresh `201`, charged once.
 | Lock held too long | another session holds the account row | `503` + `Retry-After` after ~2s; nothing committed |
 | Rollback past the treasury seed with payments present | `migrate reset` | refused with a clear message; nothing changed |
 | **Server process killed** (`kill -9`) mid-payment | real binary, `SIGKILL` while the payment waits on a lock | client gets a connection error; PostgreSQL rolls back (no `COMMIT` was sent); after restart the same key charges once |
+| Worker dies mid-handler | `pg_terminate_backend` during the handler | handler's write and the processed mark both rolled back; no failure recorded; redelivered exactly once |
+| Event redelivered | `processed_at` reset to NULL, twice | still exactly one notification (`UNIQUE (event_id)`) |
+| Handler fails / panics / unknown event type | test handlers | writes rolled back via savepoint; `attempts`, `last_error`, backoff recorded; other events still delivered |
 | **Graceful shutdown** (`SIGTERM`) mid-payment | real binary, `SIGTERM` while the payment waits on a lock | new connections refused at once; the in-flight payment commits (`201`); exit code 0 |
 
 ## Every status code is tested
@@ -97,8 +101,15 @@ code on purpose and confirming they fail (mutation testing):
 | Ignore a failed audit write | audit-failure rollback test (got `201`, want `500`) |
 | `srv.Close()` instead of graceful `srv.Shutdown()` | graceful-shutdown test (in-flight payment cut off) |
 | Commit the idempotency claim in its own transaction first | kill test (orphaned claim would block every retry) |
+| Notification insert without `ON CONFLICT DO NOTHING` | redelivery test (consumer not idempotent) |
+| No rollback of a failed handler's writes | retry test (the failed attempt's write survived) |
+| Outbox event written for failed payments too | event test (an event for money that never moved) |
+| Worker query without `SKIP LOCKED` | competing-workers test (workers queue behind one lock instead of taking different events) |
 
 One lesson is recorded in [ADR 0003](decisions/0003-idempotency-claim-inside-the-transaction.md):
 a concurrency test that relies on random timing caught the naive idempotency
 bug only 4 times in 30, so concurrency tests here force the interleaving
 (by holding a lock) instead of hoping for it.
+The competing-workers test was first written the hopeful way and still passed
+with `SKIP LOCKED` removed; it now holds every worker at a barrier until all of
+them have an event at once, which only `SKIP LOCKED` makes possible.
