@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/nandini7486/fincore/backend/internal/outbox"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
@@ -241,6 +242,29 @@ func TestPoisonEventsDoNotBlockOthers(t *testing.T) {
 	}
 }
 
+// appPool opens a pool running as fincore_app with room for n concurrent
+// transactions. The shared test pool's size depends on the machine's CPU
+// count (pgxpool default), which would silently cap concurrency on small CI
+// runners.
+func appPool(t *testing.T, tdb *testdb.DB, n int32) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(tdb.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = n
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		_, err := c.Exec(ctx, "SET ROLE fincore_app")
+		return err
+	}
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p
+}
+
 // Several workers draining at once must each take a DIFFERENT event at the
 // same time (FOR UPDATE SKIP LOCKED), and every event must be delivered
 // exactly once.
@@ -280,12 +304,13 @@ func TestCompetingWorkersDeliverEachEventOnce(t *testing.T) {
 		}
 	}
 
+	pool := appPool(t, tdb, workers+2)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := &outbox.Worker{DB: tdb.App, Handlers: map[string]outbox.Handler{"x.happened": handler(i)}}
+			w := &outbox.Worker{DB: pool, Handlers: map[string]outbox.Handler{"x.happened": handler(i)}}
 			if _, err := w.Drain(context.Background()); err != nil {
 				t.Errorf("worker %d: %v", i, err)
 			}
@@ -294,7 +319,7 @@ func TestCompetingWorkersDeliverEachEventOnce(t *testing.T) {
 	wg.Wait()
 
 	if !allHeld.Load() {
-		t.Fatalf("the %d workers never held %d different events at once: they blocked on each other's locks (is SKIP LOCKED missing?)", workers, workers)
+		t.Fatalf("the %d workers never held %d different events at once: either they blocked on each other's row locks (SKIP LOCKED missing?) or the pool has fewer than %d connections", workers, workers, workers)
 	}
 	if n := count(t, tdb, `SELECT count(DISTINCT worker) FROM test_deliveries`); n != workers {
 		t.Fatalf("%d workers delivered events, want all %d", n, workers)
