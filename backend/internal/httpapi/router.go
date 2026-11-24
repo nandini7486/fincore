@@ -45,6 +45,8 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(auth.Middleware(d.DB))
 		r.Get("/me", me)
+		r.Post("/accounts", createAccount(d.DB))
+		r.Get("/accounts/{accountID}", getAccount(d.DB))
 	})
 
 	return r
