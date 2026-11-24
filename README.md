@@ -24,7 +24,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 0 | Repo, Go module, Compose, CI | ✅ Done |
 | 1 | PostgreSQL schema and migrations | ✅ Done |
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
-| 3 | Idempotency and concurrency | ⏳ |
+| 3 | Idempotency and concurrency | 🚧 In progress (3a idempotency in review) |
 | 4 | Failure injection and test hardening | ⏳ |
 | 5 | Outbox, background worker, in-app notifications | ⏳ |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
@@ -50,7 +50,7 @@ so every design choice can be explained and demonstrated.
 
 | Problem in real payment systems | What goes wrong | FinCore's approach | Status |
 |---|---|---|---|
-| **Duplicate charges on retries** | A mobile client times out and retries; the server processes the payment twice | Required `Idempotency-Key`; the key is claimed with `INSERT … ON CONFLICT DO NOTHING` **inside** the payment transaction, and retries replay the stored response ([blueprint §6.3](docs/FINCORE_PROJECT_BLUEPRINT.md#63-why-the-claim-is-inside-the-transaction)) | Schema ✅ · claim and replay Phase 3 |
+| **Duplicate charges on retries** | A mobile client times out and retries; the server processes the payment twice | Required `Idempotency-Key`; the key is claimed with `INSERT … ON CONFLICT DO NOTHING` **inside** the payment transaction, and retries replay the stored response ([blueprint §6.3](docs/FINCORE_PROJECT_BLUEPRINT.md#63-why-the-claim-is-inside-the-transaction)) | ✅ in-transaction claim, replay, `409`; double-charge race tested ([ADR 0003](docs/decisions/0003-idempotency-claim-inside-the-transaction.md)) |
 | **Double-spend under concurrency** | Two simultaneous payments both pass the balance check and overdraw the account | Both account rows locked in one statement, in ID order, and funds checked while locked; a database `CHECK` makes negative user balances impossible even if code is wrong | ✅ locking, `CHECK`, concurrency test |
 | **Deadlocks between opposite transfers** | A→B and B→A lock rows in opposite orders and block each other | Deterministic lock order (`ORDER BY id FOR UPDATE`), plus `lock_timeout` returned as a retryable `503` | ✅ tested; more scenarios Phase 3 |
 | **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | ✅ ledger, checked after every test · reconciliation command Phase 3 |
@@ -154,7 +154,11 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
   nothing is committed, so retrying is safe.
 - Top-ups move money from the treasury, the only account allowed to go
   negative. Its balance equals the money issued.
-- `Idempotency-Key` handling arrives in Phase 3.
+- **`Idempotency-Key` is required.** Send a new UUID per payment and the same
+  one on every retry. A retry of a completed request returns the stored
+  response with `Idempotent-Replayed: true` and moves no money; the same key
+  with a different request is `409 IDEMPOTENCY_KEY_REUSED`. Keys are per user
+  and expire after 24 hours. See [ADR 0003](docs/decisions/0003-idempotency-claim-inside-the-transaction.md).
 
 **History**
 
@@ -217,9 +221,11 @@ curl -X POST -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/acc
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/accounts/<account_id>
 # admin token: fund an account
 curl -X POST -H "Authorization: Bearer <admin_token>" -H 'Content-Type: application/json' \
+     -H "Idempotency-Key: $(uuidgen)" \
      -d '{"amount":"5000.00","currency":"INR"}' http://localhost:8080/api/v1/accounts/<account_id>/topups
 # transfer
 curl -X POST -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+     -H "Idempotency-Key: $(uuidgen)" \
      -d '{"sender_account_id":"<from>","receiver_account_id":"<to>","amount":"2000.00","currency":"INR"}' \
      http://localhost:8080/api/v1/payments
 # history (then add &cursor=<next_cursor> for the next page)
@@ -287,6 +293,7 @@ backend/
     audit/              Append-only audit log writer
     auth/               Bearer-token auth, identity, role checks
     httpapi/            Router, middleware, handlers
+    idempotency/        Idempotency-Key claim, fingerprint, stored responses
     money/              Minor units <-> decimal strings (no floats)
     payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
     users/              User creation
@@ -305,6 +312,12 @@ docs/
 
 ## Changelog
 
+- **Phase 3a — idempotency:** required `Idempotency-Key` on payments and
+  top-ups; claim inside the payment transaction, replay of `201`/`422`,
+  `409` on reuse, per-user scope, 24-hour expiry; `idempotency.conflict`
+  audited ([ADR 0003](docs/decisions/0003-idempotency-claim-inside-the-transaction.md)).
+  A deterministic in-flight duplicate test catches a naive check-then-insert
+  10/10 times.
 - **Phase 2d — reading payments:** `GET /api/v1/payments/{id}` (sender or
   receiver owner) and `GET /api/v1/accounts/{id}/payments` with keyset
   pagination and an opaque cursor ([ADR 0002](docs/decisions/0002-keyset-pagination-for-history.md));

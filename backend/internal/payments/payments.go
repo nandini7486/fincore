@@ -12,7 +12,7 @@
 //  5. Write the payment.create / topup.create audit record.
 //
 // The caller commits, so all of it becomes visible together or not at all.
-// Idempotency-Key handling is added in Phase 3.
+// Idempotency (Phase 3) wraps this path; see package idempotency.
 package payments
 
 import (
@@ -99,6 +99,19 @@ const (
 	statementTimeout = "5s"
 )
 
+// ApplyTimeouts sets lock_timeout and statement_timeout for the rest of
+// the transaction. Call it first in every money-moving transaction, before
+// the idempotency claim, which can also wait on a lock.
+func ApplyTimeouts(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+lockTimeout+"'"); err != nil {
+		return MapDBError(err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+statementTimeout+"'"); err != nil {
+		return MapDBError(err)
+	}
+	return nil
+}
+
 type lockedAccount struct {
 	id       string
 	userID   *string
@@ -126,7 +139,7 @@ func CreateTopUp(ctx context.Context, tx pgx.Tx, r Request) (Payment, error) {
 		`SELECT id FROM accounts WHERE type = 'TREASURY' AND currency = $1`, r.Currency,
 	).Scan(&r.SenderID)
 	if err != nil {
-		return Payment{}, mapDBError(fmt.Errorf("find treasury: %w", err))
+		return Payment{}, MapDBError(fmt.Errorf("find treasury: %w", err))
 	}
 	if r.ReceiverID == r.SenderID {
 		return Payment{}, ErrReceiverNotFound // the treasury cannot top itself up
@@ -141,11 +154,8 @@ func execute(ctx context.Context, tx pgx.Tx, r Request, senderAllowed func(locke
 		// The HTTP layer rejects this as a 400; the database also refuses it.
 		return Payment{}, fmt.Errorf("sender and receiver must differ")
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+lockTimeout+"'"); err != nil {
-		return Payment{}, mapDBError(err)
-	}
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+statementTimeout+"'"); err != nil {
-		return Payment{}, mapDBError(err)
+	if err := ApplyTimeouts(ctx, tx); err != nil {
+		return Payment{}, err
 	}
 
 	// Lock both rows in ONE statement, ordered by ID. Two opposite
@@ -160,19 +170,19 @@ func execute(ctx context.Context, tx pgx.Tx, r Request, senderAllowed func(locke
 		FOR UPDATE`,
 		[]string{r.SenderID, r.ReceiverID})
 	if err != nil {
-		return Payment{}, mapDBError(fmt.Errorf("lock accounts: %w", err))
+		return Payment{}, MapDBError(fmt.Errorf("lock accounts: %w", err))
 	}
 	locked := map[string]lockedAccount{}
 	for rows.Next() {
 		var a lockedAccount
 		if err := rows.Scan(&a.id, &a.userID, &a.typ, &a.currency, &a.balance, &a.status); err != nil {
 			rows.Close()
-			return Payment{}, mapDBError(fmt.Errorf("scan account: %w", err))
+			return Payment{}, MapDBError(fmt.Errorf("scan account: %w", err))
 		}
 		locked[a.id] = a
 	}
 	if err := rows.Err(); err != nil {
-		return Payment{}, mapDBError(fmt.Errorf("lock accounts: %w", err))
+		return Payment{}, MapDBError(fmt.Errorf("lock accounts: %w", err))
 	}
 
 	sender, ok := locked[r.SenderID]
@@ -212,7 +222,7 @@ func execute(ctx context.Context, tx pgx.Tx, r Request, senderAllowed func(locke
 	}
 
 	if err := writeAudit(ctx, tx, r, p); err != nil {
-		return Payment{}, mapDBError(err)
+		return Payment{}, MapDBError(err)
 	}
 	if reason != "" {
 		return p, &RuleError{Payment: p}
@@ -239,7 +249,7 @@ func insertPayment(ctx context.Context, tx pgx.Tx, r Request, reason string) (Pa
 		status, failure, r.InitiatedBy, reqctx.RequestID(ctx),
 	).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
-		return Payment{}, mapDBError(fmt.Errorf("insert payment: %w", err))
+		return Payment{}, MapDBError(fmt.Errorf("insert payment: %w", err))
 	}
 	return p, nil
 }
@@ -250,18 +260,18 @@ func move(ctx context.Context, tx pgx.Tx, p Payment) error {
 	if _, err := tx.Exec(ctx,
 		`UPDATE accounts SET balance = balance - $2, updated_at = now() WHERE id = $1`,
 		p.SenderID, p.Amount); err != nil {
-		return mapDBError(fmt.Errorf("debit sender: %w", err))
+		return MapDBError(fmt.Errorf("debit sender: %w", err))
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE accounts SET balance = balance + $2, updated_at = now() WHERE id = $1`,
 		p.ReceiverID, p.Amount); err != nil {
-		return mapDBError(fmt.Errorf("credit receiver: %w", err))
+		return MapDBError(fmt.Errorf("credit receiver: %w", err))
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO ledger_entries (payment_id, account_id, entry_type, amount, currency)
 		VALUES ($1, $2, 'DEBIT', $4, $5), ($1, $3, 'CREDIT', $4, $5)`,
 		p.ID, p.SenderID, p.ReceiverID, p.Amount, p.Currency); err != nil {
-		return mapDBError(fmt.Errorf("insert ledger entries: %w", err))
+		return MapDBError(fmt.Errorf("insert ledger entries: %w", err))
 	}
 	return nil
 }
@@ -295,9 +305,9 @@ func writeAudit(ctx context.Context, tx pgx.Tx, r Request, p Payment) error {
 	})
 }
 
-// mapDBError turns lock and statement timeouts into ErrBusy so the API can
-// answer 503 (safe to retry) instead of 500.
-func mapDBError(err error) error {
+// MapDBError turns lock and statement timeouts into ErrBusy so the API can
+// answer 503 (safe to retry) instead of 500. Other errors pass through.
+func MapDBError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
