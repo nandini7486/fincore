@@ -1,9 +1,7 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
@@ -57,14 +55,8 @@ func createAccount(p Pool) http.HandlerFunc {
 		id, _ := auth.FromContext(r.Context())
 
 		var req createAccountRequest
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAccountBodyBytes))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Request body must be a JSON object with an optional \"currency\" field.")
-			return
-		}
-		if dec.More() {
-			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Request body must contain a single JSON object.")
+		if err := decodeJSONBody(w, r, &req, maxAccountBodyBytes); err != nil && !errors.Is(err, errEmptyBody) {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Request body must be a single JSON object with an optional \"currency\" field.")
 			return
 		}
 
