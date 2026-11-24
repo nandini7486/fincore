@@ -27,7 +27,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
 | 3 | Idempotency and concurrency | ✅ Done |
 | 4 | Failure injection and test hardening | ✅ Done |
-| 5 | Outbox, background worker, in-app notifications | ⏳ |
+| 5 | Outbox, background worker, in-app notifications | 🚧 In progress (5a in review) |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
 
 Phase 2 is delivered in four PRs:
@@ -55,7 +55,7 @@ so every design choice can be explained and demonstrated.
 | **Double-spend under concurrency** | Two simultaneous payments both pass the balance check and overdraw the account | Both account rows locked in one statement, in ID order, and funds checked while locked; a database `CHECK` makes negative user balances impossible even if code is wrong | ✅ locking, `CHECK`, concurrency test |
 | **Deadlocks between opposite transfers** | A→B and B→A lock rows in opposite orders and block each other | Deterministic lock order (`ORDER BY id FOR UPDATE`), plus `lock_timeout` returned as a retryable `503` | ✅ tested; more scenarios Phase 3 |
 | **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | ✅ ledger · `fincorectl reconcile` (one snapshot, exit 1 on any problem), run after every payment test |
-| **Lost or phantom events (dual writes)** | The payment commits but the notification event is lost, or the event is sent for a payment that rolled back | **Transactional outbox**: the event row commits in the same transaction as the money; a worker delivers it afterwards | Table ✅ · worker Phase 5 |
+| **Lost or phantom events (dual writes)** | The payment commits but the notification event is lost, or the event is sent for a payment that rolled back | **Transactional outbox**: the event row commits in the same transaction as the money; a worker delivers it afterwards | ✅ event written in the payment transaction; `cmd/worker` delivers with `SKIP LOCKED`, retries, idempotent consumer ([ADR 0004](docs/decisions/0004-transactional-outbox-and-worker.md)) |
 | **Money moves without an audit trail** | Ops and compliance cannot answer "who did what, when, from where" | Audit record written **in the same transaction** as each change, so it cannot be missing; every record carries the request ID, which also appears in logs and errors | ✅ users, auth, accounts, payments, top-ups |
 | **Floating-point money bugs** | `0.1 + 0.2 ≠ 0.3`; rounding errors accumulate in balances | Money is `BIGINT` paise in the database and `int64` in Go; the API uses decimal strings like `"2000.00"`, never JSON numbers | ✅ |
 | **Broken object-level authorization (IDOR)** | Changing an ID in the URL exposes another customer's account (OWASP API Top 10 #1) | Identity comes only from the token; any account you may not see returns the **same 404**, and probing is audited ([ADR 0001](docs/decisions/0001-not-found-for-inaccessible-accounts.md)) | ✅ |
@@ -219,9 +219,13 @@ every total looking correct) to prove each is caught.
 
 ## Notifications
 
-No external or paid service. A payment writes an event to the PostgreSQL
-**outbox** in the same transaction; a Go worker turns it into an in-app
-notification (`GET /api/v1/notifications`). V2 adds Server-Sent Events,
+No external or paid service. A successful payment writes an event to the
+PostgreSQL **outbox** in the same transaction; the worker (`cmd/worker`)
+turns it into an in-app notification for the receiver, such as
+"You received ₹2,000.00 from Alice." Several workers can run at once
+(`FOR UPDATE SKIP LOCKED`); failed events retry with backoff; redelivery
+never duplicates a notification. See [ADR 0004](docs/decisions/0004-transactional-outbox-and-worker.md).
+`GET /api/v1/notifications` arrives in Phase 5b. V2 adds Server-Sent Events,
 webhooks and optional Mailpit email on top of the same worker.
 See [blueprint §8.6](docs/FINCORE_PROJECT_BLUEPRINT.md#86-notifications).
 
@@ -244,6 +248,7 @@ go run ./cmd/migrate up              # apply migrations
 go run ./cmd/fincorectl user create -name "Alice" -email alice@example.com
 
 go run ./cmd/api                     # API on http://localhost:8080
+go run ./cmd/worker                  # in another terminal: notifications + cleanup
 curl http://localhost:8080/readyz
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/me
 curl -X POST -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/accounts
@@ -268,12 +273,15 @@ PowerShell: use `$env:DATABASE_URL = "postgres://..."` instead of `export`.
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `DB_MAX_CONNS` | `10` | Connection pool size |
+| `WORKER_POLL_INTERVAL` | `1s` | Worker: how often to look for outbox events |
+| `IDEMPOTENCY_CLEANUP_INTERVAL` | `1m` | Worker: how often to delete expired idempotency keys |
 
 Commands:
 
 | Command | Purpose |
 |---|---|
 | `go run ./cmd/api` | Run the API server |
+| `go run ./cmd/worker` | Run the outbox worker (notifications, key cleanup) |
 | `go run ./cmd/migrate up\|down\|reset\|status` | Manage migrations |
 | `go run ./cmd/fincorectl user create -name N -email E [-role ADMIN]` | Create a user and print its token |
 | `go run ./cmd/fincorectl reconcile [-json]` | Check the books balance; exit 0 OK, 1 problems found, 2 error |
@@ -324,6 +332,7 @@ workflows from there.
 ```text
 backend/
   cmd/api/              HTTP API server
+  cmd/worker/           Outbox worker (notifications, idempotency cleanup)
   cmd/migrate/          Migration runner (up, down, reset, status)
   cmd/fincorectl/       Operator CLI (create users, reconcile)
   internal/
@@ -332,7 +341,9 @@ backend/
     auth/               Bearer-token auth, identity, role checks
     httpapi/            Router, middleware, handlers
     idempotency/        Idempotency-Key claim, fingerprint, stored responses
-    money/              Minor units <-> decimal strings (no floats)
+    money/              Minor units <-> decimal strings (no floats), ₹ display
+    notifications/      Outbox consumer: in-app notifications
+    outbox/             Transactional outbox: Write + worker (SKIP LOCKED, retries)
     payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
     reconcile/          Books check: balances vs ledger, zero sum, per-payment entries
     users/              User creation
@@ -351,6 +362,12 @@ docs/
 
 ## Changelog
 
+- **Phase 5a — outbox and worker:** successful payments write
+  `payment.succeeded` / `topup.succeeded` in the same transaction;
+  `cmd/worker` delivers them (`SKIP LOCKED`, savepoint per handler, retries
+  with backoff, panic-safe) to an idempotent notifications consumer, and
+  deletes expired idempotency keys in batches; `money.FormatINR`
+  ([ADR 0004](docs/decisions/0004-transactional-outbox-and-worker.md)).
 - **Phase 4b — process failures:** tests that build and run the real API
   binary: `kill -9` mid-payment (rolled back; after restart the same key
   charges once) and `SIGTERM` mid-payment (new connections refused, the

@@ -316,6 +316,9 @@ func TestServerKilledMidPaymentThenRestarted(t *testing.T) {
 	if n := w.count(t, `SELECT count(*) FROM idempotency_records WHERE key = $1`, key); n != 0 {
 		t.Fatal("the killed request's idempotency claim survived")
 	}
+	if n := w.count(t, `SELECT count(*) FROM outbox_events WHERE event_type = 'payment.succeeded'`); n != 0 {
+		t.Fatal("an outbox event survived the killed payment")
+	}
 	if got := w.aliceBalance(t); got != 10000 {
 		t.Fatalf("alice = %d after kill, want 10000", got)
 	}

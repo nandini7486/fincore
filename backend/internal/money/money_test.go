@@ -84,3 +84,26 @@ func FuzzParseFormatRoundTrip(f *testing.F) {
 		}
 	})
 }
+
+func TestFormatINR(t *testing.T) {
+	for _, tc := range []struct {
+		minor int64
+		want  string
+	}{
+		{0, "₹0.00"},
+		{5, "₹0.05"},
+		{99999, "₹999.99"},
+		{100000, "₹1,000.00"},
+		{200000, "₹2,000.00"},
+		{1000000, "₹10,000.00"},
+		{10000000, "₹1,00,000.00"},      // one lakh
+		{123456789, "₹12,34,567.89"},    // twelve lakh...
+		{1000000000, "₹1,00,00,000.00"}, // one crore
+		{money.MaxAmount, "₹1,00,00,000.00"},
+		{-50000000, "-₹5,00,000.00"}, // treasury balances are negative
+	} {
+		if got := money.FormatINR(tc.minor); got != tc.want {
+			t.Errorf("FormatINR(%d) = %q, want %q", tc.minor, got, tc.want)
+		}
+	}
+}

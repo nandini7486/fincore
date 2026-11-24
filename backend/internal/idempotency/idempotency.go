@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // MaxKeyLength matches the CHECK constraint on idempotency_records.key.
@@ -146,4 +147,37 @@ func Save(ctx context.Context, tx pgx.Tx, userID, key, paymentID string, status 
 		return fmt.Errorf("save idempotency response: key was not claimed")
 	}
 	return nil
+}
+
+// CleanupBatch is how many expired records one DELETE removes. Small
+// batches keep each statement short, so cleanup never holds locks long
+// enough to slow down payments.
+const CleanupBatch = 1000
+
+// DeleteExpired removes idempotency records whose 24-hour window has passed,
+// in batches, and returns how many it deleted. Run by the worker.
+func DeleteExpired(ctx context.Context, q interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}) (int64, error) {
+	var total int64
+	for {
+		tag, err := q.Exec(ctx, `
+			DELETE FROM idempotency_records
+			WHERE (user_id, key) IN (
+				SELECT user_id, key FROM idempotency_records
+				WHERE expires_at <= now()
+				LIMIT $1
+				FOR UPDATE SKIP LOCKED
+			)`, CleanupBatch)
+		if err != nil {
+			return total, fmt.Errorf("delete expired idempotency records: %w", err)
+		}
+		total += tag.RowsAffected()
+		if tag.RowsAffected() < CleanupBatch {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+	}
 }

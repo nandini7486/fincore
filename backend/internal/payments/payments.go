@@ -9,7 +9,8 @@
 //  3. On a rule failure, store a FAILED payment and change nothing else.
 //  4. Otherwise store a SUCCESS payment, debit and credit the balances, and
 //     write one DEBIT and one CREDIT ledger entry.
-//  5. Write the payment.create / topup.create audit record.
+//  5. On success, write a payment.succeeded / topup.succeeded outbox event.
+//  6. Write the payment.create / topup.create audit record.
 //
 // The caller commits, so all of it becomes visible together or not at all.
 // Idempotency (Phase 3) wraps this path; see package idempotency.
@@ -25,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/nandini7486/fincore/backend/internal/audit"
+	"github.com/nandini7486/fincore/backend/internal/outbox"
 	"github.com/nandini7486/fincore/backend/internal/platform/reqctx"
 )
 
@@ -219,6 +221,9 @@ func execute(ctx context.Context, tx pgx.Tx, r Request, senderAllowed func(locke
 		if err := move(ctx, tx, p); err != nil {
 			return Payment{}, err
 		}
+		if err := writeEvent(ctx, tx, r, p); err != nil {
+			return Payment{}, MapDBError(err)
+		}
 	}
 
 	if err := writeAudit(ctx, tx, r, p); err != nil {
@@ -274,6 +279,36 @@ func move(ctx context.Context, tx pgx.Tx, p Payment) error {
 		return MapDBError(fmt.Errorf("insert ledger entries: %w", err))
 	}
 	return nil
+}
+
+// SucceededEvent is the outbox payload for payment.succeeded and
+// topup.succeeded. Consumers read it instead of re-querying the payment.
+type SucceededEvent struct {
+	PaymentID         string `json:"payment_id"`
+	Type              Type   `json:"type"`
+	SenderAccountID   string `json:"sender_account_id"`
+	ReceiverAccountID string `json:"receiver_account_id"`
+	AmountMinor       int64  `json:"amount_minor"`
+	Currency          string `json:"currency"`
+	InitiatedBy       string `json:"initiated_by_user_id"`
+}
+
+// writeEvent records the payment.succeeded / topup.succeeded outbox event
+// in the payment's own transaction: it exists only if the money moved.
+func writeEvent(ctx context.Context, tx pgx.Tx, r Request, p Payment) error {
+	eventType := outbox.PaymentSucceeded
+	if p.Type == TopUp {
+		eventType = outbox.TopUpSucceeded
+	}
+	return outbox.Write(ctx, tx, eventType, p.ID, SucceededEvent{
+		PaymentID:         p.ID,
+		Type:              p.Type,
+		SenderAccountID:   p.SenderID,
+		ReceiverAccountID: p.ReceiverID,
+		AmountMinor:       p.Amount,
+		Currency:          p.Currency,
+		InitiatedBy:       r.InitiatedBy,
+	})
 }
 
 func writeAudit(ctx context.Context, tx pgx.Tx, r Request, p Payment) error {

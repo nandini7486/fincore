@@ -30,6 +30,9 @@ func (m *moneyEnv) assertNoTrace(t *testing.T, key, wantAliceBalance string) {
 	if n := m.count(t, `SELECT count(*) FROM audit_log WHERE action = 'payment.create'`); n != 0 {
 		t.Errorf("payment.create audit records after failure = %d, want 0", n)
 	}
+	if n := m.count(t, `SELECT count(*) FROM outbox_events WHERE event_type = 'payment.succeeded'`); n != 0 {
+		t.Errorf("payment.succeeded events after failure = %d, want 0 (an event for money that never moved)", n)
+	}
 	if got := m.balance(t, m.aliceToken, m.aliceAcct); got != wantAliceBalance {
 		t.Errorf("alice balance = %s, want %s (unchanged)", got, wantAliceBalance)
 	}

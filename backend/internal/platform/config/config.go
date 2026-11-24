@@ -13,6 +13,10 @@ type Config struct {
 	DatabaseURL     string
 	DBMaxConns      int32
 	ShutdownTimeout time.Duration
+
+	// Worker settings (cmd/worker).
+	WorkerPollInterval time.Duration // how often to look for outbox events
+	CleanupInterval    time.Duration // how often to delete expired idempotency keys
 }
 
 // Load reads configuration from the environment. DATABASE_URL is required.
@@ -22,6 +26,9 @@ func Load() (Config, error) {
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		DBMaxConns:      10,
 		ShutdownTimeout: 10 * time.Second,
+
+		WorkerPollInterval: time.Second,
+		CleanupInterval:    time.Minute,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -32,6 +39,21 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("DB_MAX_CONNS must be a positive integer, got %q", v)
 		}
 		cfg.DBMaxConns = int32(n)
+	}
+	for _, d := range []struct {
+		key string
+		dst *time.Duration
+	}{
+		{"WORKER_POLL_INTERVAL", &cfg.WorkerPollInterval},
+		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.CleanupInterval},
+	} {
+		if v := os.Getenv(d.key); v != "" {
+			dur, err := time.ParseDuration(v)
+			if err != nil || dur <= 0 {
+				return Config{}, fmt.Errorf("%s must be a positive duration such as 1s or 500ms, got %q", d.key, v)
+			}
+			*d.dst = dur
+		}
 	}
 	return cfg, nil
 }
