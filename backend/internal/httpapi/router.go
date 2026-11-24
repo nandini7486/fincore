@@ -47,6 +47,9 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/me", me)
 		r.Post("/accounts", createAccount(d.DB))
 		r.Get("/accounts/{accountID}", getAccount(d.DB))
+		r.With(auth.RequireRole(d.DB, auth.RoleAdmin)).
+			Post("/accounts/{accountID}/topups", createTopUp(d.DB))
+		r.Post("/payments", createPayment(d.DB))
 	})
 
 	return r

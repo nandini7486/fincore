@@ -26,6 +26,9 @@ type ErrorDetail struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	// PaymentID is set on 422 responses: the business-rule failure was
+	// stored as a FAILED payment the client can look up.
+	PaymentID string `json:"payment_id,omitempty"`
 }
 
 // WriteError writes the standard error envelope. Messages must be safe to

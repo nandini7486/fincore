@@ -34,8 +34,8 @@ Phase 2 is delivered in four PRs:
 | Step | Contents | State |
 |---|---|---|
 | 2a | API foundation: config, DB pool, router, request IDs, errors, logging, `/readyz`, token auth, audit writer, `fincorectl` | ✅ Done |
-| 2b | Accounts: create and get | 🚧 In review |
-| 2c | Money parsing, top-ups, payments, ledger | ⏳ |
+| 2b | Accounts: create and get | ✅ Done |
+| 2c | Money parsing, top-ups, payments, ledger | 🚧 In review |
 | 2d | Payment details and account history (cursor pagination) | ⏳ |
 
 V2 (Phases 7–12): hardened auth, dashboards, Python AI service, React UI with
@@ -50,12 +50,12 @@ so every design choice can be explained and demonstrated.
 
 | Problem in real payment systems | What goes wrong | FinCore's approach | Status |
 |---|---|---|---|
-| **Duplicate charges on retries** | A mobile client times out and retries; the server processes the payment twice | Required `Idempotency-Key`; the key is claimed with `INSERT … ON CONFLICT DO NOTHING` **inside** the payment transaction, and retries replay the stored response ([blueprint §6.3](docs/FINCORE_PROJECT_BLUEPRINT.md#63-why-the-claim-is-inside-the-transaction)) | Schema ✅ · logic Phase 2c/3 |
-| **Double-spend under concurrency** | Two simultaneous payments both pass the balance check and overdraw the account | Both account rows locked in one statement, in ID order, and funds checked while locked; a database `CHECK` makes negative user balances impossible even if code is wrong | `CHECK` ✅ · locking Phase 2c/3 |
-| **Deadlocks between opposite transfers** | A→B and B→A lock rows in opposite orders and block each other | Deterministic lock order (`ORDER BY id FOR UPDATE`), plus `lock_timeout` returned as a retryable `503` | Phase 3 |
-| **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | Append-only ✅ · reconciliation Phase 2c+ |
+| **Duplicate charges on retries** | A mobile client times out and retries; the server processes the payment twice | Required `Idempotency-Key`; the key is claimed with `INSERT … ON CONFLICT DO NOTHING` **inside** the payment transaction, and retries replay the stored response ([blueprint §6.3](docs/FINCORE_PROJECT_BLUEPRINT.md#63-why-the-claim-is-inside-the-transaction)) | Schema ✅ · claim and replay Phase 3 |
+| **Double-spend under concurrency** | Two simultaneous payments both pass the balance check and overdraw the account | Both account rows locked in one statement, in ID order, and funds checked while locked; a database `CHECK` makes negative user balances impossible even if code is wrong | ✅ locking, `CHECK`, concurrency test |
+| **Deadlocks between opposite transfers** | A→B and B→A lock rows in opposite orders and block each other | Deterministic lock order (`ORDER BY id FOR UPDATE`), plus `lock_timeout` returned as a retryable `503` | ✅ tested; more scenarios Phase 3 |
+| **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | ✅ ledger, checked after every test · reconciliation command Phase 3 |
 | **Lost or phantom events (dual writes)** | The payment commits but the notification event is lost, or the event is sent for a payment that rolled back | **Transactional outbox**: the event row commits in the same transaction as the money; a worker delivers it afterwards | Table ✅ · worker Phase 5 |
-| **Money moves without an audit trail** | Ops and compliance cannot answer "who did what, when, from where" | Audit record written **in the same transaction** as each change, so it cannot be missing; every record carries the request ID, which also appears in logs and errors | ✅ users, auth, accounts |
+| **Money moves without an audit trail** | Ops and compliance cannot answer "who did what, when, from where" | Audit record written **in the same transaction** as each change, so it cannot be missing; every record carries the request ID, which also appears in logs and errors | ✅ users, auth, accounts, payments, top-ups |
 | **Floating-point money bugs** | `0.1 + 0.2 ≠ 0.3`; rounding errors accumulate in balances | Money is `BIGINT` paise in the database and `int64` in Go; the API uses decimal strings like `"2000.00"`, never JSON numbers | ✅ |
 | **Broken object-level authorization (IDOR)** | Changing an ID in the URL exposes another customer's account (OWASP API Top 10 #1) | Identity comes only from the token; any account you may not see returns the **same 404**, and probing is audited ([ADR 0001](docs/decisions/0001-not-found-for-inaccessible-accounts.md)) | ✅ |
 | **Over-privileged application database user** | A bug or injection can rewrite history | The API runs as `fincore_app`, which has no `UPDATE`/`DELETE` on the ledger or audit log; a trigger blocks them anyway; tests run with exactly these privileges | ✅ |
@@ -125,6 +125,8 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 | `GET` | `/api/v1/me` | Bearer token | Returns the authenticated user |
 | `POST` | `/api/v1/accounts` | Bearer token | Open an INR account (balance `0.00`, `ACTIVE`) |
 | `GET` | `/api/v1/accounts/{account_id}` | Bearer token, owner only | Account details and balance |
+| `POST` | `/api/v1/accounts/{account_id}/topups` | Bearer token, **admin** | Fund an account from the treasury |
+| `POST` | `/api/v1/payments` | Bearer token, sender owner | Transfer between accounts |
 
 - Every response carries an `X-Request-ID` (client-supplied if well-formed,
   otherwise generated). The same ID appears in logs, error bodies and audit records.
@@ -135,6 +137,22 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 - Money is returned as a decimal string (`"0.00"`), never a JSON number.
 - Accounts you may not see (someone else's, the treasury, missing or malformed
   IDs) all return the same `404 ACCOUNT_NOT_FOUND`.
+
+**Payments and top-ups**
+
+- Amounts are decimal strings (`"2000.00"`): greater than zero, at most two
+  decimal places, up to ₹1,00,00,000.00. No floats, signs or exponents.
+- One transaction per payment: lock both accounts **in ID order**, check the
+  rules while locked, then write the payment, both balance changes, one DEBIT
+  and one CREDIT ledger entry, and the audit record.
+- Business-rule failures (`INSUFFICIENT_FUNDS`, `ACCOUNT_INACTIVE`,
+  `CURRENCY_MISMATCH`) are stored as `FAILED` payments and return `422` with
+  the `payment_id`; no money moves.
+- Lock or statement timeouts return `503 SERVICE_BUSY` with `Retry-After`;
+  nothing is committed, so retrying is safe.
+- Top-ups move money from the treasury, the only account allowed to go
+  negative. Its balance equals the money issued.
+- `Idempotency-Key` handling arrives in Phase 3.
 
 **Authentication (V1)**
 
@@ -186,6 +204,13 @@ curl http://localhost:8080/readyz
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/me
 curl -X POST -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/accounts
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/accounts/<account_id>
+# admin token: fund an account
+curl -X POST -H "Authorization: Bearer <admin_token>" -H 'Content-Type: application/json' \
+     -d '{"amount":"5000.00","currency":"INR"}' http://localhost:8080/api/v1/accounts/<account_id>/topups
+# transfer
+curl -X POST -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+     -d '{"sender_account_id":"<from>","receiver_account_id":"<to>","amount":"2000.00","currency":"INR"}' \
+     http://localhost:8080/api/v1/payments
 ```
 
 PowerShell: use `$env:DATABASE_URL = "postgres://..."` instead of `export`.
@@ -250,6 +275,7 @@ backend/
     auth/               Bearer-token auth, identity, role checks
     httpapi/            Router, middleware, handlers
     money/              Minor units <-> decimal strings (no floats)
+    payments/           Transfers, top-ups, ledger entries (one transaction each)
     users/              User creation
     platform/           config, db (pool, WithTx), httpx (JSON/errors), reqctx
     testutil/testdb/    Per-package throwaway test databases
@@ -266,6 +292,12 @@ docs/
 
 ## Changelog
 
+- **Phase 2c — money movement:** strict `money.Parse` (fuzz-tested round trip),
+  `POST /api/v1/payments` and admin `POST /api/v1/accounts/{id}/topups`;
+  ordered row locks, rules checked under lock, double-entry ledger, `FAILED`
+  payments for rule failures (`422`), `lock_timeout`/`statement_timeout` as
+  `503`, validation failures audited. Tests check ledger invariants after
+  every scenario, concurrency (no overdraft, no deadlock) and lock timeouts.
 - **Phase 2b — accounts:** `POST /api/v1/accounts` and owner-only
   `GET /api/v1/accounts/{account_id}`; `account.create` audited in the same
   transaction; uniform `404` plus `authz.denied` audit for other users'
