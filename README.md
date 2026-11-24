@@ -24,7 +24,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 0 | Repo, Go module, Compose, CI | ✅ Done |
 | 1 | PostgreSQL schema and migrations | ✅ Done |
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
-| 3 | Idempotency and concurrency | 🚧 In progress (3a idempotency in review) |
+| 3 | Idempotency and concurrency | ✅ Done |
 | 4 | Failure injection and test hardening | ⏳ |
 | 5 | Outbox, background worker, in-app notifications | ⏳ |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
@@ -53,7 +53,7 @@ so every design choice can be explained and demonstrated.
 | **Duplicate charges on retries** | A mobile client times out and retries; the server processes the payment twice | Required `Idempotency-Key`; the key is claimed with `INSERT … ON CONFLICT DO NOTHING` **inside** the payment transaction, and retries replay the stored response ([blueprint §6.3](docs/FINCORE_PROJECT_BLUEPRINT.md#63-why-the-claim-is-inside-the-transaction)) | ✅ in-transaction claim, replay, `409`; double-charge race tested ([ADR 0003](docs/decisions/0003-idempotency-claim-inside-the-transaction.md)) |
 | **Double-spend under concurrency** | Two simultaneous payments both pass the balance check and overdraw the account | Both account rows locked in one statement, in ID order, and funds checked while locked; a database `CHECK` makes negative user balances impossible even if code is wrong | ✅ locking, `CHECK`, concurrency test |
 | **Deadlocks between opposite transfers** | A→B and B→A lock rows in opposite orders and block each other | Deterministic lock order (`ORDER BY id FOR UPDATE`), plus `lock_timeout` returned as a retryable `503` | ✅ tested; more scenarios Phase 3 |
-| **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | ✅ ledger, checked after every test · reconciliation command Phase 3 |
+| **Ledger drift** | Stored balances slowly disagree with transaction history, and nobody can say which is right | Balance is only a projection; the **append-only double-entry ledger** is the source of truth; a reconciliation check verifies every balance and that the global ledger sums to zero | ✅ ledger · `fincorectl reconcile` (one snapshot, exit 1 on any problem), run after every payment test |
 | **Lost or phantom events (dual writes)** | The payment commits but the notification event is lost, or the event is sent for a payment that rolled back | **Transactional outbox**: the event row commits in the same transaction as the money; a worker delivers it afterwards | Table ✅ · worker Phase 5 |
 | **Money moves without an audit trail** | Ops and compliance cannot answer "who did what, when, from where" | Audit record written **in the same transaction** as each change, so it cannot be missing; every record carries the request ID, which also appears in logs and errors | ✅ users, auth, accounts, payments, top-ups |
 | **Floating-point money bugs** | `0.1 + 0.2 ≠ 0.3`; rounding errors accumulate in balances | Money is `BIGINT` paise in the database and `int64` in Go; the API uses decimal strings like `"2000.00"`, never JSON numbers | ✅ |
@@ -188,6 +188,34 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 - Append-only ledger and audit log: a trigger rejects `UPDATE`, `DELETE` and
   `TRUNCATE`, and the `fincore_app` role is never granted those privileges.
 
+## Reconciliation
+
+`fincorectl reconcile` proves the books balance. In one `REPEATABLE READ`
+snapshot (so payments committing meanwhile cannot cause false alarms) it
+checks that:
+
+1. every account balance equals the sum of its ledger entries,
+2. the whole ledger sums to zero (money is never created or destroyed),
+3. every successful payment has exactly one DEBIT on the sender and one
+   CREDIT on the receiver, for the payment's amount,
+4. failed payments have no ledger entries.
+
+```text
+$ fincorectl reconcile
+Checked 3 accounts, 2 payments, 4 ledger entries.
+Ledger sum: 0 (must be 0)
+Accounts whose balance disagrees with the ledger: 1
+  646782bc-… (USER): stored 59000, ledger 9000, difference 50000
+Payments with wrong ledger entries: 0
+PROBLEMS FOUND: investigate before moving more money.
+```
+
+Exit codes (0 OK, 1 problems, 2 error) make it usable from cron or CI. Each
+run is audited as `reconciliation.run`. The payment tests run the same
+reconciler after every test, and its own tests corrupt the books five
+different ways (including a credit posted to the wrong account, which leaves
+every total looking correct) to prove each is caught.
+
 ## Notifications
 
 No external or paid service. A payment writes an event to the PostgreSQL
@@ -247,6 +275,7 @@ Commands:
 | `go run ./cmd/api` | Run the API server |
 | `go run ./cmd/migrate up\|down\|reset\|status` | Manage migrations |
 | `go run ./cmd/fincorectl user create -name N -email E [-role ADMIN]` | Create a user and print its token |
+| `go run ./cmd/fincorectl reconcile [-json]` | Check the books balance; exit 0 OK, 1 problems found, 2 error |
 
 ## Test
 
@@ -287,7 +316,7 @@ workflows from there.
 backend/
   cmd/api/              HTTP API server
   cmd/migrate/          Migration runner (up, down, reset, status)
-  cmd/fincorectl/       Operator CLI (create users)
+  cmd/fincorectl/       Operator CLI (create users, reconcile)
   internal/
     accounts/           Account creation and owner-only reads
     audit/              Append-only audit log writer
@@ -296,6 +325,7 @@ backend/
     idempotency/        Idempotency-Key claim, fingerprint, stored responses
     money/              Minor units <-> decimal strings (no floats)
     payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
+    reconcile/          Books check: balances vs ledger, zero sum, per-payment entries
     users/              User creation
     platform/           config, db (pool, WithTx), httpx (JSON/errors), ids, reqctx
     testutil/testdb/    Per-package throwaway test databases
@@ -312,6 +342,12 @@ docs/
 
 ## Changelog
 
+- **Phase 3b — reconciliation and stress:** `internal/reconcile` and
+  `fincorectl reconcile [-json]` (snapshot isolation, audited, exit codes);
+  payment tests now use the real reconciler; five corruption scenarios
+  tested; HTTP stress test with random concurrent payments, concurrent
+  top-ups and double-sent requests ends with balanced books and balances
+  matching an independent model. Phase 3 complete.
 - **Phase 3a — idempotency:** required `Idempotency-Key` on payments and
   top-ups; claim inside the payment transaction, replay of `201`/`422`,
   `409` on reuse, per-user scope, 24-hour expiry; `idempotency.conflict`

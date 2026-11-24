@@ -13,6 +13,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/auth"
 	"github.com/nandini7486/fincore/backend/internal/payments"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
+	"github.com/nandini7486/fincore/backend/internal/reconcile"
 	"github.com/nandini7486/fincore/backend/internal/testutil/testdb"
 	"github.com/nandini7486/fincore/backend/internal/users"
 )
@@ -118,40 +119,18 @@ func (f *fixture) count(sql string, args ...any) int {
 	return n
 }
 
-// assertInvariants checks NFR-03: every balance equals its ledger history,
-// and the whole ledger sums to zero (credits positive, debits negative).
+// assertInvariants runs the real reconciler (NFR-03) after every test, so
+// the payment tests and fincorectl reconcile share one definition of
+// "the books balance".
 func (f *fixture) assertInvariants() {
 	f.t.Helper()
-	ctx := context.Background()
-	drift := f.count(`
-		SELECT count(*) FROM accounts a
-		LEFT JOIN (
-			SELECT account_id,
-			       sum(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE -amount END) AS net
-			FROM ledger_entries GROUP BY account_id
-		) l ON l.account_id = a.id
-		WHERE a.balance <> coalesce(l.net, 0)`)
-	if drift != 0 {
-		f.t.Errorf("invariant: %d account balance(s) disagree with the ledger", drift)
+	rep, err := reconcile.Run(context.Background(), f.db.Owner)
+	if err != nil {
+		f.t.Fatalf("reconcile: %v", err)
 	}
-	var total int64
-	if err := f.db.Owner.QueryRow(ctx, `
-		SELECT coalesce(sum(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE -amount END), 0)
-		FROM ledger_entries`).Scan(&total); err != nil {
-		f.t.Fatal(err)
-	}
-	if total != 0 {
-		f.t.Errorf("invariant: global ledger sum = %d, want 0", total)
-	}
-	unbalanced := f.count(`
-		SELECT count(*) FROM payments p
-		WHERE p.status = 'SUCCESS' AND (
-			SELECT count(*) FROM ledger_entries e WHERE e.payment_id = p.id) <> 2`)
-	if unbalanced != 0 {
-		f.t.Errorf("invariant: %d successful payment(s) without exactly one debit and one credit", unbalanced)
-	}
-	if n := f.count(`SELECT count(*) FROM ledger_entries e JOIN payments p ON p.id = e.payment_id WHERE p.status <> 'SUCCESS'`); n != 0 {
-		f.t.Errorf("invariant: %d ledger entries belong to non-successful payments", n)
+	if !rep.OK() {
+		f.t.Errorf("books do not balance: ledger sum %d, %d account mismatch(es) %+v, %d payment problem(s) %+v",
+			rep.LedgerSum, rep.AccountMismatchCount, rep.AccountMismatches, rep.PaymentProblemCount, rep.PaymentProblems)
 	}
 }
 

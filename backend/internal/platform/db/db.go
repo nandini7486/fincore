@@ -65,3 +65,29 @@ func WithTx(ctx context.Context, b TxBeginner, fn func(tx pgx.Tx) error) error {
 	}
 	return nil
 }
+
+// SnapshotBeginner is implemented by *pgxpool.Pool.
+type SnapshotBeginner interface {
+	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
+}
+
+// WithSnapshotTx runs fn in a REPEATABLE READ transaction: every statement
+// sees the same snapshot of the database, taken at the first query. Use it
+// for multi-query consistency checks (reconciliation) that must not see a
+// payment half-way through being committed by another session. It commits
+// if fn returns nil and rolls back otherwise.
+func WithSnapshotTx(ctx context.Context, b SnapshotBeginner, fn func(tx pgx.Tx) error) error {
+	tx, err := b.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return fmt.Errorf("begin snapshot transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit snapshot transaction: %w", err)
+	}
+	return nil
+}

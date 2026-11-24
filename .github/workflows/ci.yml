@@ -57,6 +57,11 @@ jobs:
           go run ./cmd/migrate up
           go run ./cmd/migrate status
 
+      - name: Reconcile CLI on a fresh database
+        env:
+          DATABASE_URL: ${{ env.FINCORE_TEST_DATABASE_URL }}
+        run: go run ./cmd/fincorectl reconcile
+
   compose:
     runs-on: ubuntu-latest
     steps:
