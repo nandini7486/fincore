@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -12,20 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/nandini7486/fincore/backend/internal/testutil/testdb"
 	"github.com/nandini7486/fincore/backend/migrations"
 )
-
-// These tests need a disposable PostgreSQL database. They reset the schema.
-// CI provides one; locally: docker compose up -d postgres, then set
-// FINCORE_TEST_DATABASE_URL.
-func testDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("FINCORE_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("FINCORE_TEST_DATABASE_URL not set; skipping database tests")
-	}
-	return dsn
-}
 
 const (
 	sqlstateCheckViolation   = "23514"
@@ -34,7 +22,8 @@ const (
 )
 
 func TestMigrations(t *testing.T) {
-	dsn := testDSN(t)
+	// A fresh, empty database just for this test (dropped afterwards).
+	dsn := testdb.NewEmpty(t)
 	ctx := context.Background()
 
 	db, err := sql.Open("pgx", dsn)
