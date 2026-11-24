@@ -2,9 +2,13 @@ package httpapi_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/nandini7486/fincore/backend/internal/auth"
@@ -42,16 +46,45 @@ func setupMoney(t *testing.T) *moneyEnv {
 	return m
 }
 
+// newKey returns a fresh Idempotency-Key, as a client would per payment.
+func newKey() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// moneyPost sends a POST with an Idempotency-Key ("" sends none).
+func (m *moneyEnv) moneyPost(t *testing.T, path, token, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	rec := httptest.NewRecorder()
+	m.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func topUpBody(amount string) string {
+	return fmt.Sprintf(`{"amount":%q,"currency":"INR"}`, amount)
+}
+
+func payBody(from, to, amount string) string {
+	return fmt.Sprintf(`{"sender_account_id":%q,"receiver_account_id":%q,"amount":%q,"currency":"INR"}`, from, to, amount)
+}
+
 func (m *moneyEnv) topUp(t *testing.T, token, account, amount string) *httpResult {
 	t.Helper()
-	return result(m.doBody(t, http.MethodPost, "/api/v1/accounts/"+account+"/topups", token,
-		fmt.Sprintf(`{"amount":%q,"currency":"INR"}`, amount)))
+	return result(m.moneyPost(t, "/api/v1/accounts/"+account+"/topups", token, newKey(), topUpBody(amount)))
 }
 
 func (m *moneyEnv) pay(t *testing.T, token, from, to, amount string) *httpResult {
 	t.Helper()
-	return result(m.doBody(t, http.MethodPost, "/api/v1/payments", token,
-		fmt.Sprintf(`{"sender_account_id":%q,"receiver_account_id":%q,"amount":%q,"currency":"INR"}`, from, to, amount)))
+	return result(m.moneyPost(t, "/api/v1/payments", token, newKey(), payBody(from, to, amount)))
 }
 
 func (m *moneyEnv) balance(t *testing.T, token, account string) string {
@@ -70,6 +103,8 @@ type httpResult struct {
 	payment   paymentBody
 	errCode   string
 	paymentID string // set on 422
+	replayed  bool   // Idempotent-Replayed: true
+	raw       map[string]any
 }
 
 func result(rec interface {
@@ -77,9 +112,12 @@ func result(rec interface {
 }) *httpResult {
 	res := rec.Result()
 	defer res.Body.Close()
-	r := &httpResult{code: res.StatusCode, requestID: res.Header.Get("X-Request-ID")}
+	r := &httpResult{code: res.StatusCode, requestID: res.Header.Get("X-Request-ID"),
+		replayed: res.Header.Get("Idempotent-Replayed") == "true"}
 	var raw map[string]json.RawMessage
 	_ = json.NewDecoder(res.Body).Decode(&raw)
+	b, _ := json.Marshal(raw)
+	_ = json.Unmarshal(b, &r.raw)
 	if e, ok := raw["error"]; ok {
 		var d struct {
 			Code      string `json:"code"`
@@ -89,7 +127,6 @@ func result(rec interface {
 		r.errCode, r.paymentID = d.Code, d.PaymentID
 		return r
 	}
-	b, _ := json.Marshal(raw)
 	_ = json.Unmarshal(b, &r.payment)
 	return r
 }
@@ -228,7 +265,7 @@ func TestPaymentValidation(t *testing.T) {
 		{"missing currency", fmt.Sprintf(`{"sender_account_id":%q,"receiver_account_id":%q,"amount":"1.00"}`, a, b), "UNSUPPORTED_CURRENCY"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := result(m.doBody(t, http.MethodPost, "/api/v1/payments", m.aliceToken, tc.body))
+			r := result(m.moneyPost(t, "/api/v1/payments", m.aliceToken, newKey(), tc.body))
 			if r.code != http.StatusBadRequest || r.errCode != tc.code {
 				t.Fatalf("got %d %s, want 400 %s", r.code, r.errCode, tc.code)
 			}
