@@ -52,6 +52,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/payments", createPayment(d.DB))
 		r.Get("/payments/{paymentID}", getPayment(d.DB))
 		r.Get("/accounts/{accountID}/payments", accountPayments(d.DB))
+		r.Get("/notifications", listNotifications(d.DB))
 	})
 
 	return r

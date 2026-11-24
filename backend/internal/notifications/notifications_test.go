@@ -12,6 +12,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/notifications"
 	"github.com/nandini7486/fincore/backend/internal/outbox"
 	"github.com/nandini7486/fincore/backend/internal/payments"
+	"github.com/nandini7486/fincore/backend/internal/platform/cursor"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
 	"github.com/nandini7486/fincore/backend/internal/testutil/testdb"
 	"github.com/nandini7486/fincore/backend/internal/users"
@@ -217,5 +218,57 @@ func TestBadEventsAreRecordedNotCrashing(t *testing.T) {
 				t.Fatalf("processed=%v last_error=%q, want %q", processed, got, tc.wantErr)
 			}
 		})
+	}
+}
+
+// Notifications created in the same microsecond still page correctly: the
+// cursor's id tie-breaker applies to this query too.
+func TestListBreaksTimestampTiesByID(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	// Five events and notifications for bob, all with one identical timestamp.
+	if _, err := w.db.Owner.Exec(ctx, `
+		WITH ev AS (
+			INSERT INTO outbox_events (event_type, aggregate_id, payload, processed_at)
+			SELECT 'payment.succeeded', gen_random_uuid(), '{}', now() FROM generate_series(1, 5)
+			RETURNING id
+		)
+		INSERT INTO notifications (user_id, event_id, message, created_at)
+		SELECT $1, id, 'tie', '2026-01-01T10:00:00Z' FROM ev`, w.bob); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := w.db.Owner.Query(ctx, `SELECT id FROM notifications WHERE user_id = $1 ORDER BY created_at DESC, id DESC`, w.bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, limit := range []int{1, 2, 4} {
+		var got []string
+		var after *cursor.Cursor
+		for pages := 0; pages < 10; pages++ {
+			page, next, err := notifications.List(ctx, w.db.App, w.bob, after, limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range page {
+				got = append(got, n.ID)
+			}
+			if next == nil {
+				break
+			}
+			after = next
+		}
+		if len(got) != len(want) {
+			t.Fatalf("limit %d: got %d notifications %v, want %d", limit, len(got), got, len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("limit %d: order %v, want %v", limit, got, want)
+			}
+		}
 	}
 }

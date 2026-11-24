@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end smoke test: builds the real binaries, creates a fresh database,
-# starts the API and exercises every endpoint over HTTP, then reconciles.
+# starts the API and the worker, exercises every endpoint over HTTP
+# (including notifications delivered by the worker), then reconciles.
 #
 # It is the gate before starting a new phase: everything built so far must
 # still work through the real server, not only in unit tests.
@@ -23,6 +24,7 @@ DB="fincore_smoke_$(date +%s)_$$"
 PORT=${FINCORE_SMOKE_PORT:-18181}
 BASE="http://127.0.0.1:$PORT"
 API_PID=""
+WORKER_PID=""
 
 # Swap the database name in the admin URL.
 DATABASE_URL=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print(u.urlunsplit(p._replace(path="/"+sys.argv[2])))' "$FINCORE_ADMIN_DATABASE_URL" "$DB")
@@ -30,6 +32,7 @@ export DATABASE_URL HTTP_ADDR="127.0.0.1:$PORT"
 
 cleanup() {
   [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null && wait "$API_PID" 2>/dev/null || true
+  [ -n "$WORKER_PID" ] && kill "$WORKER_PID" 2>/dev/null && wait "$WORKER_PID" 2>/dev/null || true
   psql "$FINCORE_ADMIN_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -71,7 +74,7 @@ expect() {
 }
 
 echo "== build"
-(cd "$ROOT/backend" && go build -o "$WORK/api" ./cmd/api && go build -o "$WORK/migrate" ./cmd/migrate && go build -o "$WORK/fincorectl" ./cmd/fincorectl)
+(cd "$ROOT/backend" && go build -o "$WORK/api" ./cmd/api && go build -o "$WORK/migrate" ./cmd/migrate && go build -o "$WORK/fincorectl" ./cmd/fincorectl && go build -o "$WORK/worker" ./cmd/worker)
 
 echo "== fresh database $DB"
 psql "$FINCORE_ADMIN_DATABASE_URL" -qc "CREATE DATABASE $DB" >/dev/null
@@ -87,6 +90,10 @@ echo "== start API on :$PORT"
 "$WORK/api" >"$WORK/api.log" 2>&1 &
 API_PID=$!
 for _ in $(seq 1 50); do curl -sf "$BASE/readyz" >/dev/null && break; sleep 0.1; done
+
+echo "== start worker"
+WORKER_POLL_INTERVAL=200ms "$WORK/worker" >"$WORK/worker.log" 2>&1 &
+WORKER_PID=$!
 
 echo "== health"
 req GET /healthz ""; expect "GET /healthz" 200 .status ok
@@ -152,11 +159,28 @@ total=$(grep -c . <<<"$SEEN"); unique=$(sort -u <<<"$SEEN" | grep -c .)
 if [ "$total" = 4 ] && [ "$unique" = 4 ]; then pass "history: 4 payments across pages, no duplicates"; else fail "history: $total seen, $unique unique, want 4"; fi
 req GET "/api/v1/accounts/$A/payments?cursor=tampered" "$ALICE"; expect "tampered cursor -> 400" 400 .error.code INVALID_CURSOR
 
+echo "== notifications (delivered by the worker)"
+# bob received 250.50 and 10.00 (the duplicate-tested payment, once); the
+# failed 5000.00 payment produced none. alice's top-up produced one.
+for _ in $(seq 1 50); do
+  req GET /api/v1/notifications "$BOB"
+  [ "$(jq '.notifications | length' <<<"$BODY")" = 2 ] && break
+  sleep 0.1
+done
+expect "bob has 2 notifications (worker delivered them)" 200 '.notifications | length' 2
+expect "newest: the idempotent 10.00 payment" 200 '.notifications[0].message' "You received ₹10.00 from Alice."
+expect "older: the 250.50 payment" 200 '.notifications[1].payment_id' "$P1"
+req GET /api/v1/notifications "$ALICE"; expect "alice: top-up notification" 200 '.notifications[0].message' "₹1,000.00 was added to your account."
+req GET "/api/v1/notifications?limit=1" "$BOB"; expect "notifications page 1 of 2" 200 '.notifications | length' 1
+req GET /api/v1/notifications ""; expect "notifications without token -> 401" 401
+pending=$(psql "$DATABASE_URL" -Atc "SELECT count(*) FROM outbox_events WHERE processed_at IS NULL")
+if [ "$pending" = 0 ]; then pass "no undelivered outbox events"; else fail "$pending outbox events still pending"; fi
+
 echo "== reconciliation"
 if "$WORK/fincorectl" reconcile >"$WORK/reconcile.txt"; then pass "fincorectl reconcile: books balance"; else fail "fincorectl reconcile: $(cat "$WORK/reconcile.txt")"; fi
 
 echo "== hygiene"
-if grep -q 'fct_' "$WORK/api.log"; then fail "a token appeared in the server log"; else pass "no tokens in server log"; fi
+if grep -q 'fct_' "$WORK/api.log" "$WORK/worker.log"; then fail "a token appeared in a server log"; else pass "no tokens in server or worker logs"; fi
 
 echo
 echo "smoke: $PASS passed, $FAIL failed"

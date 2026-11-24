@@ -27,7 +27,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
 | 3 | Idempotency and concurrency | ✅ Done |
 | 4 | Failure injection and test hardening | ✅ Done |
-| 5 | Outbox, background worker, in-app notifications | 🚧 In progress (5a in review) |
+| 5 | Outbox, background worker, in-app notifications | ✅ Done |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
 
 Phase 2 is delivered in four PRs:
@@ -130,6 +130,7 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 | `POST` | `/api/v1/payments` | Bearer token, sender owner | Transfer between accounts |
 | `GET` | `/api/v1/payments/{payment_id}` | Bearer token, sender or receiver owner | Payment details (incl. `failure_reason`) |
 | `GET` | `/api/v1/accounts/{account_id}/payments?limit=&cursor=` | Bearer token, owner only | Payment history, newest first |
+| `GET` | `/api/v1/notifications?limit=&cursor=` | Bearer token | Your notifications, newest first (delivered by the worker) |
 
 - Every response carries an `X-Request-ID` (client-supplied if well-formed,
   otherwise generated). The same ID appears in logs, error bodies and audit records.
@@ -180,7 +181,7 @@ See [blueprint §9](docs/FINCORE_PROJECT_BLUEPRINT.md#9-ai-intelligence-service-
 
 **Database**
 
-- 9 migrations: `users`, `accounts`, `payments`, `ledger_entries`,
+- 10 migrations: `users`, `accounts`, `payments`, `ledger_entries`,
   `idempotency_records`, `audit_log`, `outbox_events`, `notifications`, plus
   the INR treasury account.
 - Database-enforced safety nets: non-negative user balances, one treasury per
@@ -225,7 +226,8 @@ turns it into an in-app notification for the receiver, such as
 "You received ₹2,000.00 from Alice." Several workers can run at once
 (`FOR UPDATE SKIP LOCKED`); failed events retry with backoff; redelivery
 never duplicates a notification. See [ADR 0004](docs/decisions/0004-transactional-outbox-and-worker.md).
-`GET /api/v1/notifications` arrives in Phase 5b. V2 adds Server-Sent Events,
+Read them with `GET /api/v1/notifications?limit=&cursor=` (newest first, the
+same keyset pagination as payment history, each with its `payment_id`). V2 adds Server-Sent Events,
 webhooks and optional Mailpit email on top of the same worker.
 See [blueprint §8.6](docs/FINCORE_PROJECT_BLUEPRINT.md#86-notifications).
 
@@ -347,7 +349,7 @@ backend/
     payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
     reconcile/          Books check: balances vs ledger, zero sum, per-payment entries
     users/              User creation
-    platform/           config, db (pool, WithTx), httpx (JSON/errors), ids, reqctx
+    platform/           config, db (pool, WithTx), cursor, httpx (JSON/errors), ids, reqctx
     testutil/testdb/    Per-package throwaway test databases
   migrations/           goose SQL migrations (embedded) + schema tests
 frontend/               React + TypeScript dashboard (V2, placeholder)
@@ -362,6 +364,11 @@ docs/
 
 ## Changelog
 
+- **Phase 5b — notifications API:** `GET /api/v1/notifications` (caller's own,
+  newest first, keyset pagination, `payment_id`); shared `platform/cursor`
+  and `pageParams`; migration 10 adds `(user_id, created_at DESC, id DESC)`
+  (0.25 ms per page on 200k notifications); the smoke test now runs the
+  worker and checks notifications over HTTP (35 checks). Phase 5 complete.
 - **Phase 5a — outbox and worker:** successful payments write
   `payment.succeeded` / `topup.succeeded` in the same transaction;
   `cmd/worker` delivers them (`SKIP LOCKED`, savepoint per handler, retries

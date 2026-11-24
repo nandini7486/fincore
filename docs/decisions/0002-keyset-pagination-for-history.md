@@ -53,6 +53,12 @@ exactly, five payments with the same timestamp page correctly, and new
 payments arriving mid-scroll do not shift later pages. Removing `id` from the
 cursor condition makes the tie test fail (it returned 1 of 5 payments).
 
+## Also used by
+
+`GET /api/v1/notifications` uses the same cursor (`internal/platform/cursor`)
+and pagination rules, served by `notifications (user_id, created_at DESC, id DESC)`
+(migration 10): 0.25 ms per page on 200,000 notifications, index scan, no sort.
+
 ## Consequences
 
 - Clients can only move forward page by page; there is no "jump to page 37".
