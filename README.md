@@ -16,6 +16,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | [Project blueprint](docs/FINCORE_PROJECT_BLUEPRINT.md) | Requirements, architecture, API, roadmap, confirmed decisions |
 | [Database schema design](docs/database/schema-design.md) | ER diagram, constraints, invariants, roles, migration plan |
 | [Decision records](docs/decisions/) | Why key design choices were made |
+| [Testing](docs/TESTING.md) | Test layers, failure scenarios, status-code coverage, mutation checks |
 
 ## Status
 
@@ -25,7 +26,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 1 | PostgreSQL schema and migrations | ✅ Done |
 | 2 | Go API: auth, accounts, top-ups, payments, ledger, audit log | ✅ Done |
 | 3 | Idempotency and concurrency | ✅ Done |
-| 4 | Failure injection and test hardening | ⏳ |
+| 4 | Failure injection and test hardening | 🚧 In progress (4a in review) |
 | 5 | Outbox, background worker, in-app notifications | ⏳ |
 | 6 | Docker image, metrics, load test, V1 release | ⏳ |
 
@@ -295,8 +296,16 @@ export FINCORE_TEST_DATABASE_URL=postgres://fincore:fincore_local_dev@localhost:
 go test ./...
 ```
 
-CI runs everything, including the database tests and a migrate CLI round trip,
-on every push and pull request.
+End-to-end gate (builds the real binaries, fresh database, every endpoint
+over HTTP, then reconciliation):
+
+```sh
+FINCORE_ADMIN_DATABASE_URL=$FINCORE_TEST_DATABASE_URL scripts/smoke.sh
+```
+
+CI runs everything, including the database tests, a migrate CLI round trip,
+`fincorectl reconcile` and the smoke test, on every push and pull request.
+See [docs/TESTING.md](docs/TESTING.md) for failure scenarios and coverage.
 
 ## Repository layout
 
@@ -342,6 +351,12 @@ docs/
 
 ## Changelog
 
+- **Phase 4a — failure injection:** tests that break audit and ledger writes,
+  kill the database connection and disconnect the client mid-payment, each
+  proving nothing partial survives and the retry charges once; client
+  disconnects logged as `499` warnings instead of `500` errors; migration 9
+  refuses rollback once money has moved; `scripts/smoke.sh` end-to-end gate
+  in CI; `docs/TESTING.md`.
 - **Phase 3b — reconciliation and stress:** `internal/reconcile` and
   `fincorectl reconcile [-json]` (snapshot isolation, audited, exit codes);
   payment tests now use the real reconciler; five corruption scenarios

@@ -41,8 +41,23 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	}})
 }
 
+// StatusClientClosedRequest is the non-standard 499 (nginx convention): the
+// client disconnected before the server finished. Nobody receives it; it
+// exists so logs and metrics can tell client disconnects from server faults.
+const StatusClientClosedRequest = 499
+
 // WriteInternalError logs err with the request ID and returns a generic 500.
+//
+// If the client has already gone away (its request context is cancelled),
+// the failure was caused by the disconnect, not by a server fault: the work
+// was rolled back, so this is logged as a warning with status 499 instead.
 func WriteInternalError(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		reqctx.Logger(r.Context()).Warn("client disconnected before completion; work rolled back",
+			"err", err, "path", r.URL.Path)
+		WriteError(w, r, StatusClientClosedRequest, "CLIENT_CLOSED_REQUEST", "The client closed the request.")
+		return
+	}
 	reqctx.Logger(r.Context()).Error("internal error", "err", err, "path", r.URL.Path)
 	WriteError(w, r, http.StatusInternalServerError, "INTERNAL", "An unexpected error occurred.")
 }
