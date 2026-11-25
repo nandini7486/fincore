@@ -106,7 +106,7 @@ func start(t *testing.T, dsn string) *server {
 	addr := freePort(t)
 	s := &server{t: t, base: "http://" + addr, logs: &syncBuffer{}, exited: make(chan struct{})}
 	s.cmd = exec.Command(binary)
-	s.cmd.Env = append(os.Environ(), "DATABASE_URL="+u.String(), "HTTP_ADDR="+addr)
+	s.cmd.Env = append(os.Environ(), "DATABASE_URL="+u.String(), "HTTP_ADDR="+addr, "METRICS_ADDR=127.0.0.1:0")
 	s.cmd.Stdout, s.cmd.Stderr = s.logs, s.logs
 	if err := s.cmd.Start(); err != nil {
 		t.Fatal(err)

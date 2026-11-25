@@ -7,7 +7,7 @@
 # still work through the real server, not only in unit tests.
 #
 # Usage:
-#   FINCORE_ADMIN_DATABASE_URL=postgres://user:pass@localhost:5432/postgres scripts/smoke.sh
+#   FINCORE_ADMIN_DATABASE_URL=postgres://user:pass@localhost:5432/postgres devops/scripts/smoke.sh
 #
 # The admin URL must allow CREATE DATABASE. A throwaway database is created
 # and dropped. Requires: go, curl, jq, uuidgen.
@@ -18,7 +18,7 @@ for tool in go curl jq uuidgen psql; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 2; }
 done
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d)
 DB="fincore_smoke_$(date +%s)_$$"
 PORT=${FINCORE_SMOKE_PORT:-18181}
@@ -29,6 +29,9 @@ WORKER_PID=""
 # Swap the database name in the admin URL.
 DATABASE_URL=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print(u.urlunsplit(p._replace(path="/"+sys.argv[2])))' "$FINCORE_ADMIN_DATABASE_URL" "$DB")
 export DATABASE_URL HTTP_ADDR="127.0.0.1:$PORT"
+# Metrics are covered by compose-check.sh; use free ports here so a busy
+# 9090/9091 on this machine cannot break the smoke test.
+export METRICS_ADDR="127.0.0.1:0"
 
 cleanup() {
   [ -n "$API_PID" ] && kill "$API_PID" 2>/dev/null && wait "$API_PID" 2>/dev/null || true
