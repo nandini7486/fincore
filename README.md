@@ -28,7 +28,7 @@ balance updates, and an append-only audit log — built in Go on PostgreSQL.
 | 3 | Idempotency and concurrency | ✅ Done |
 | 4 | Failure injection and test hardening | ✅ Done |
 | 5 | Outbox, background worker, in-app notifications | ✅ Done |
-| 6 | Docker image, metrics, load test, V1 release | ⏳ |
+| 6 | Docker image, metrics, load test, V1 release | 🚧 6a done (image, Compose stack, metrics); 6b next (load test, V1 release) |
 
 Phase 2 is delivered in four PRs:
 
@@ -236,7 +236,20 @@ See [blueprint §8.6](docs/FINCORE_PROJECT_BLUEPRINT.md#86-notifications).
 - Go (see `backend/go.mod` for the minimum version)
 - Docker Desktop (WSL2 backend on Windows)
 
-## Run locally
+## Run with Docker (everything)
+
+```sh
+docker compose -f devops/docker-compose.yml up -d --build --wait   # postgres -> migrate -> api + worker
+docker compose -f devops/docker-compose.yml run --rm fincorectl user create -name Alice -email alice@example.com
+curl http://localhost:8080/readyz
+curl http://localhost:9090/metrics        # API metrics (internal port; worker: 9091)
+```
+
+The API and worker connect as a least-privilege login that cannot modify
+ledger or audit rows. See [devops/README.md](devops/README.md) for the image,
+the start order, privileges and the metrics list.
+
+## Run locally (Go on the host)
 
 ```sh
 cp devops/.env.example devops/.env                          # adjust values if needed
@@ -274,6 +287,7 @@ PowerShell: use `$env:DATABASE_URL = "postgres://..."` instead of `export`.
 |---|---|---|
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | Listen address |
+| `METRICS_ADDR` | API `:9090`, worker `:9091` | Internal `/metrics` listener; `off` disables |
 | `DB_MAX_CONNS` | `10` | Connection pool size |
 | `WORKER_POLL_INTERVAL` | `1s` | Worker: how often to look for outbox events |
 | `IDEMPOTENCY_CLEANUP_INTERVAL` | `1m` | Worker: how often to delete expired idempotency keys |
@@ -310,11 +324,19 @@ End-to-end gate (builds the real binaries, fresh database, every endpoint
 over HTTP, then reconciliation):
 
 ```sh
-FINCORE_ADMIN_DATABASE_URL=$FINCORE_TEST_DATABASE_URL scripts/smoke.sh
+FINCORE_ADMIN_DATABASE_URL=$FINCORE_TEST_DATABASE_URL devops/scripts/smoke.sh
+```
+
+Deployment gate (builds the Docker image and checks the whole Compose stack:
+release-step migrations, least-privilege login, metrics, graceful stop):
+
+```sh
+devops/scripts/compose-check.sh
 ```
 
 CI runs everything, including the database tests, a migrate CLI round trip,
-`fincorectl reconcile` and the smoke test, on every push and pull request.
+`fincorectl reconcile`, the smoke test and the Compose check, on every push
+and pull request.
 See [docs/TESTING.md](docs/TESTING.md) for failure scenarios and coverage.
 
 ## Repository layout
@@ -327,7 +349,7 @@ workflows from there.
 |---|---|---|
 | [`backend/`](backend) | Go API, CLIs, migrations, tests | Active |
 | [`frontend/`](frontend) | React + TypeScript dashboard | Planned (V2) |
-| [`devops/`](devops) | Docker Compose, env template; later Dockerfiles, monitoring | Active |
+| [`devops/`](devops) | Dockerfile, Compose stack, env template, gate scripts | Active |
 | [`docs/`](docs) | Blueprint, schema design, decisions | Active |
 | [`.github/`](.github) | CI workflow | Active |
 
@@ -349,13 +371,15 @@ backend/
     payments/           Transfers, top-ups, ledger entries, history (keyset pagination)
     reconcile/          Books check: balances vs ledger, zero sum, per-payment entries
     users/              User creation
-    platform/           config, db (pool, WithTx), cursor, httpx (JSON/errors), ids, reqctx
+    platform/           config, db (pool, WithTx), cursor, httpx (JSON/errors), ids, metrics, reqctx
     testutil/testdb/    Per-package throwaway test databases
   migrations/           goose SQL migrations (embedded) + schema tests
 frontend/               React + TypeScript dashboard (V2, placeholder)
 devops/
-  docker-compose.yml    Local PostgreSQL
+  docker-compose.yml    Full stack: postgres, migrate, api, worker, fincorectl
   .env.example          Template for devops/.env (git-ignored)
+  docker/               Dockerfile (distroless, non-root), postgres first-boot script
+  scripts/              smoke.sh (end-to-end gate), compose-check.sh (deployment gate)
 docs/
   database/             Schema design
   decisions/            Architecture decision records (ADRs)
@@ -363,6 +387,14 @@ docs/
 ```
 
 ## Changelog
+
+- **Phase 6a — Docker image and metrics:** multi-stage Dockerfile (one
+  distroless, non-root image with all four binaries; about 70 MB); full Compose
+  stack with migrations as a release step and a least-privilege database
+  login for the API and worker; Prometheus `/metrics` on an internal port
+  (HTTP by route pattern, pool stats, outbox backlog and lag, build info);
+  `devops/scripts/compose-check.sh` (30 checks) in CI. `scripts/` moved to
+  `devops/scripts/` to match the blueprint layout.
 
 - **Phase 5b — notifications API:** `GET /api/v1/notifications` (caller's own,
   newest first, keyset pagination, `payment_id`); shared `platform/cursor`
@@ -383,7 +415,7 @@ docs/
   kill the database connection and disconnect the client mid-payment, each
   proving nothing partial survives and the retry charges once; client
   disconnects logged as `499` warnings instead of `500` errors; migration 9
-  refuses rollback once money has moved; `scripts/smoke.sh` end-to-end gate
+  refuses rollback once money has moved; `devops/scripts/smoke.sh` end-to-end gate
   in CI; `docs/TESTING.md`.
 - **Phase 3b — reconciliation and stress:** `internal/reconcile` and
   `fincorectl reconcile [-json]` (snapshot isolation, audited, exit codes);

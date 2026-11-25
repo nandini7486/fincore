@@ -11,6 +11,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/auth"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
 	"github.com/nandini7486/fincore/backend/internal/platform/httpx"
+	"github.com/nandini7486/fincore/backend/internal/platform/metrics"
 )
 
 // Pool is the subset of *pgxpool.Pool the API needs.
@@ -22,6 +23,9 @@ type Pool interface {
 
 type Deps struct {
 	DB Pool
+	// Metrics, if set, records request counts and latency. /metrics itself
+	// is served on a separate internal listener, not by this router.
+	Metrics *metrics.HTTP
 }
 
 // NewRouter builds the HTTP handler.
@@ -30,7 +34,11 @@ type Deps struct {
 // it; accessLog outside recoverer so panics are logged with status 500.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
-	r.Use(requestID, accessLog, recoverer)
+	r.Use(requestID)
+	if d.Metrics != nil {
+		r.Use(d.Metrics.Middleware)
+	}
+	r.Use(accessLog, recoverer)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "Resource not found.")

@@ -1076,17 +1076,20 @@ fincore/
 │   ├── cmd/
 │   │   ├── api/
 │   │   ├── worker/
-│   │   └── fincorectl/        # admin CLI: seed users, reconcile, read audit log
+│   │   ├── migrate/            # migrations as a release step
+│   │   └── fincorectl/        # admin CLI: seed users, reconcile
 │   ├── internal/
 │   │   ├── auth/
+│   │   ├── users/
 │   │   ├── accounts/
-│   │   ├── payments/
-│   │   ├── ledger/
+│   │   ├── payments/           # also writes the ledger entries (see note)
+│   │   ├── reconcile/          # checks that the books balance
 │   │   ├── idempotency/
 │   │   ├── audit/
 │   │   ├── outbox/
+│   │   ├── notifications/      # outbox consumer + list API
 │   │   ├── money/              # amount parsing and minor units
-│   │   ├── platform/           # db pool, tx manager, config, logging
+│   │   ├── platform/           # db, config, cursor, ids, httpx, reqctx, metrics
 │   │   ├── testutil/           # test databases
 │   │   └── httpapi/            # router, middleware, handlers, errors
 │   └── migrations/
@@ -1108,6 +1111,12 @@ fincore/
 ```
 
 Create folders only when the corresponding phase begins.
+
+**Deviation from the original plan: no separate `ledger/` package.** Ledger
+entries are written only by a payment, inside the payment's transaction,
+and must never be written on their own. Keeping that code in `payments/`
+makes "a payment and its two entries commit together" impossible to bypass
+from another package. Reading the ledger to verify it lives in `reconcile/`.
 
 ------------------------------------------------------------------------
 

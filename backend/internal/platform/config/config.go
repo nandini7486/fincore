@@ -14,6 +14,9 @@ type Config struct {
 	DBMaxConns      int32
 	ShutdownTimeout time.Duration
 
+	// metricsAddr is METRICS_ADDR as given; see MetricsListenAddr.
+	metricsAddr string
+
 	// Worker settings (cmd/worker).
 	WorkerPollInterval time.Duration // how often to look for outbox events
 	CleanupInterval    time.Duration // how often to delete expired idempotency keys
@@ -26,6 +29,7 @@ func Load() (Config, error) {
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		DBMaxConns:      10,
 		ShutdownTimeout: 10 * time.Second,
+		metricsAddr:     os.Getenv("METRICS_ADDR"),
 
 		WorkerPollInterval: time.Second,
 		CleanupInterval:    time.Minute,
@@ -56,6 +60,18 @@ func Load() (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// MetricsListenAddr is where the internal /metrics listener binds: def when
+// METRICS_ADDR is unset, "" (disabled) when it is "off".
+func (c Config) MetricsListenAddr(def string) string {
+	switch c.metricsAddr {
+	case "":
+		return def
+	case "off":
+		return ""
+	}
+	return c.metricsAddr
 }
 
 func getenv(key, def string) string {

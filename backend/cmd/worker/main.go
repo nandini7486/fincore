@@ -10,11 +10,12 @@
 //	DATABASE_URL=postgres://... go run ./cmd/worker
 //
 // Optional: WORKER_POLL_INTERVAL (default 1s), IDEMPOTENCY_CLEANUP_INTERVAL
-// (default 1m), DB_MAX_CONNS.
+// (default 1m), DB_MAX_CONNS, METRICS_ADDR (default :9091, "off" disables).
 package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -29,6 +30,7 @@ import (
 	"github.com/nandini7486/fincore/backend/internal/outbox"
 	"github.com/nandini7486/fincore/backend/internal/platform/config"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
+	"github.com/nandini7486/fincore/backend/internal/platform/metrics"
 )
 
 func main() {
@@ -55,8 +57,17 @@ func run() error {
 	}
 	defer pool.Close()
 
-	w := &outbox.Worker{DB: pool, Handlers: notifications.Handlers()}
-	slog.Info("worker started", "poll_interval", cfg.WorkerPollInterval, "cleanup_interval", cfg.CleanupInterval)
+	reg := metrics.NewRegistry("worker")
+	metrics.RegisterPool(reg, pool)
+	om := metrics.NewOutbox(reg, pool)
+	stopMetrics, err := metrics.Serve(cfg.MetricsListenAddr(":9091"), reg)
+	if err != nil {
+		return fmt.Errorf("metrics listener: %w", err)
+	}
+	defer stopMetrics()
+
+	w := &outbox.Worker{DB: pool, Handlers: notifications.Handlers(), Observe: om.Observe}
+	slog.Info("worker started", "poll_interval", cfg.WorkerPollInterval, "cleanup_interval", cfg.CleanupInterval, "version", metrics.Version)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

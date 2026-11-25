@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -130,7 +133,7 @@ func TestWorkerBinary(t *testing.T) {
 	logs := &syncBuffer{}
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "DATABASE_URL="+tdb.DSN,
-		"WORKER_POLL_INTERVAL=100ms", "IDEMPOTENCY_CLEANUP_INTERVAL=200ms")
+		"WORKER_POLL_INTERVAL=100ms", "IDEMPOTENCY_CLEANUP_INTERVAL=200ms", "METRICS_ADDR=127.0.0.1:0")
 	cmd.Stdout, cmd.Stderr = logs, logs
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -154,6 +157,29 @@ func TestWorkerBinary(t *testing.T) {
 	})
 	if n := count(`SELECT count(*) FROM outbox_events WHERE processed_at IS NULL`); n != 0 {
 		t.Fatalf("pending events = %d, want 0", n)
+	}
+
+	// The worker serves its own metrics on the internal listener.
+	m := regexp.MustCompile(`"msg":"metrics listening","addr":"([^"]+)"`).FindStringSubmatch(logs.String())
+	if m == nil {
+		t.Fatalf("no metrics listener in logs:\n%s", logs.String())
+	}
+	res, err := http.Get("http://" + m[1] + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	for _, want := range []string{
+		`fincore_build_info{component="worker",version="dev"} 1`,
+		`fincore_outbox_events_handled_total{event_type="topup.succeeded",result="ok"} 1`,
+		`fincore_outbox_events_handled_total{event_type="payment.succeeded",result="ok"} 1`,
+		"fincore_outbox_pending_events 0",
+		"fincore_outbox_backlog_scrape_error 0",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("worker metrics missing %q", want)
+		}
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {

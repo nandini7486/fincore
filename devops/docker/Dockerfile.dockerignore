@@ -1,0 +1,3 @@
+# Context is backend/; only Go sources are needed.
+**/*_test.go
+**/testdata

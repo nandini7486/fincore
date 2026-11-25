@@ -78,6 +78,11 @@ type Worker struct {
 	// attempts times. Defaults to DefaultBackoff.
 	Backoff func(attempts int) time.Duration
 	Logger  *slog.Logger
+	// Observe, if set, is called once per claimed event after its handler
+	// ran, with the handler's error (nil on success) and duration. It is
+	// how cmd/worker records metrics without this package knowing about
+	// Prometheus.
+	Observe func(eventType string, err error, d time.Duration)
 }
 
 // DefaultBackoff doubles from 1s per failed attempt (1s, 2s, 4s ... 256s),
@@ -131,7 +136,11 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		if _, err := tx.Exec(ctx, "SAVEPOINT handler"); err != nil {
 			return err
 		}
+		start := time.Now()
 		herr := w.handle(ctx, tx, e)
+		if w.Observe != nil {
+			w.Observe(e.Type, herr, time.Since(start))
+		}
 		if herr == nil {
 			_, err = tx.Exec(ctx, `
 				UPDATE outbox_events

@@ -13,7 +13,7 @@ go vet ./...
 go test -race ./...            # unit, integration, concurrency, failure tests
 
 cd ..
-FINCORE_ADMIN_DATABASE_URL=$FINCORE_TEST_DATABASE_URL scripts/smoke.sh   # end-to-end gate
+FINCORE_ADMIN_DATABASE_URL=$FINCORE_TEST_DATABASE_URL devops/scripts/smoke.sh   # end-to-end gate
 ```
 
 ## The gate before every new phase
@@ -23,13 +23,18 @@ Before work on a new phase starts, all of the following must pass on `main`:
 1. `gofmt`, `go vet`, `go mod tidy -diff`
 2. `go test -race ./...`
 3. Migration round trip (`migrate reset`, `up`, `status`) on an empty database
-4. `scripts/smoke.sh`: builds the real binaries, creates a fresh database,
+4. `devops/scripts/smoke.sh`: builds the real binaries, creates a fresh database,
    starts the server and exercises every endpoint over HTTP (auth, accounts,
    top-ups, payments, simultaneous duplicate requests, history pagination,
    notifications delivered by the real worker), then runs `fincorectl
    reconcile` and checks that no token reached the API or worker logs
 
-CI runs 1-4 on every push and pull request.
+5. `devops/scripts/compose-check.sh`: builds the Docker image, starts the
+   full Compose stack and checks it as an operator would (release-step
+   migrations, non-root distroless containers, least-privilege database
+   login, metrics on internal ports only, reconcile, graceful stop, restart)
+
+CI runs 1-5 on every push and pull request.
 
 ## Test layers
 
@@ -44,7 +49,9 @@ CI runs 1-4 on every push and pull request.
 | Outbox and worker | `outbox`, `notifications`, `payments/events_test.go` | Events exist iff money moved; delivery, retries, competing workers, crash redelivery, idempotent consumer |
 | Process | `cmd/api/process_test.go`, `cmd/worker/process_test.go` | The real binaries killed or shut down mid-work behave correctly |
 | Reconciliation | `reconcile`, plus after every payments test | The books balance; five corruption types are caught |
-| End-to-end | `scripts/smoke.sh` | The real binaries work together |
+| Metrics | `platform/metrics`, `httpapi/metrics_test.go`, `cmd/worker/process_test.go` | Route-pattern labels (random URLs add no series), 401s visible, in-flight gauge returns to 0, outbox backlog/lag read from the database, `/metrics` not on the public router |
+| End-to-end | `devops/scripts/smoke.sh` | The real binaries work together |
+| Deployment | `devops/scripts/compose-check.sh` | The image and Compose stack work; the app login cannot modify ledger/audit rows (checks confirmed to fail when run as the owner) |
 
 ## Failure scenarios
 
