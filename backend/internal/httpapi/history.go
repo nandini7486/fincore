@@ -9,6 +9,7 @@ import (
 
 	"github.com/nandini7486/fincore/backend/internal/auth"
 	"github.com/nandini7486/fincore/backend/internal/payments"
+	"github.com/nandini7486/fincore/backend/internal/platform/cursor"
 	"github.com/nandini7486/fincore/backend/internal/platform/httpx"
 	"github.com/nandini7486/fincore/backend/internal/platform/ids"
 )
@@ -61,23 +62,9 @@ type historyResponse struct {
 // pagination. Owner only.
 func accountPayments(p Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		limit := defaultHistoryLimit
-		if v := r.URL.Query().Get("limit"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 || n > maxHistoryLimit {
-				httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "limit must be a whole number from 1 to 100.")
-				return
-			}
-			limit = n
-		}
-		var after *payments.Cursor
-		if v := r.URL.Query().Get("cursor"); v != "" {
-			c, err := payments.DecodeCursor(v)
-			if err != nil {
-				httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is not valid. Use the next_cursor value from a previous page.")
-				return
-			}
-			after = &c
+		limit, after, ok := pageParams(w, r)
+		if !ok {
+			return
 		}
 
 		acct, ok := ownedAccount(w, r, p)
@@ -100,4 +87,27 @@ func accountPayments(p Pool) http.HandlerFunc {
 		}
 		httpx.WriteJSON(w, http.StatusOK, resp)
 	}
+}
+
+// pageParams reads ?limit= (1-100, default 20) and ?cursor= for keyset
+// pagination. On invalid input it writes a 400 and returns ok=false.
+func pageParams(w http.ResponseWriter, r *http.Request) (limit int, after *cursor.Cursor, ok bool) {
+	limit = defaultHistoryLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxHistoryLimit {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "limit must be a whole number from 1 to 100.")
+			return 0, nil, false
+		}
+		limit = n
+	}
+	if v := r.URL.Query().Get("cursor"); v != "" {
+		c, err := cursor.Decode(v)
+		if err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor is not valid. Use the next_cursor value from a previous page.")
+			return 0, nil, false
+		}
+		after = &c
+	}
+	return limit, after, true
 }

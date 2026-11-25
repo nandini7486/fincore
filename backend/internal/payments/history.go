@@ -2,16 +2,13 @@ package payments
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/nandini7486/fincore/backend/internal/platform/cursor"
 	"github.com/nandini7486/fincore/backend/internal/platform/db"
-	"github.com/nandini7486/fincore/backend/internal/platform/ids"
 )
 
 var (
@@ -19,7 +16,6 @@ var (
 	// ErrPaymentNotVisible: the payment exists, but the caller owns neither
 	// side. Respond exactly as for ErrPaymentNotFound (ADR 0001).
 	ErrPaymentNotVisible = errors.New("payment not visible to caller")
-	ErrInvalidCursor     = errors.New("invalid cursor")
 )
 
 const paymentColumns = `id, type, sender_account_id, receiver_account_id, amount, currency,
@@ -60,38 +56,13 @@ func GetForUser(ctx context.Context, q db.DBTX, paymentID, userID string) (Payme
 	return p, nil
 }
 
-// Cursor marks the last payment of a page. History continues with payments
-// strictly older in (created_at, id) order. id breaks ties between payments
-// created in the same microsecond, so no payment is skipped or repeated.
-type Cursor struct {
-	CreatedAt time.Time
-	ID        string
-}
+// Cursor, DecodeCursor and ErrInvalidCursor are the shared keyset cursor
+// (package cursor), kept here so payment callers read naturally.
+type Cursor = cursor.Cursor
 
-// Encode returns the opaque string handed to clients. Its format is an
-// implementation detail clients must not rely on.
-func (c Cursor) Encode() string {
-	raw := c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.ID
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
-}
+var ErrInvalidCursor = cursor.ErrInvalid
 
-// DecodeCursor parses a cursor from Encode. Any tampered or malformed
-// value returns ErrInvalidCursor.
-func DecodeCursor(s string) (Cursor, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return Cursor{}, ErrInvalidCursor
-	}
-	ts, id, ok := strings.Cut(string(raw), "|")
-	if !ok || !ids.IsUUID(id) {
-		return Cursor{}, ErrInvalidCursor
-	}
-	t, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return Cursor{}, ErrInvalidCursor
-	}
-	return Cursor{CreatedAt: t, ID: id}, nil
-}
+func DecodeCursor(s string) (Cursor, error) { return cursor.Decode(s) }
 
 // History returns up to limit payments involving accountID (sent or
 // received, any status), newest first, starting after cursor (nil for the

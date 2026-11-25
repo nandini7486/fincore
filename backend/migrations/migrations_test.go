@@ -328,7 +328,8 @@ func TestRollbackRefusedAfterMoneyMoved(t *testing.T) {
 		t.Fatalf("rollback err = %v, want a clear refusal", err)
 	}
 
-	// Nothing was rolled back: still at the latest version, data intact.
+	// The rollback stops at migration 9 (later migrations, which hold no
+	// data, may roll back first); the treasury and all payments are intact.
 	version, err := p.GetDBVersion(ctx)
 	if err != nil {
 		t.Fatal(err)

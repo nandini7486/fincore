@@ -25,8 +25,9 @@ Before work on a new phase starts, all of the following must pass on `main`:
 3. Migration round trip (`migrate reset`, `up`, `status`) on an empty database
 4. `scripts/smoke.sh`: builds the real binaries, creates a fresh database,
    starts the server and exercises every endpoint over HTTP (auth, accounts,
-   top-ups, payments, simultaneous duplicate requests, history pagination),
-   then runs `fincorectl reconcile` and checks that no token reached the logs
+   top-ups, payments, simultaneous duplicate requests, history pagination,
+   notifications delivered by the real worker), then runs `fincorectl
+   reconcile` and checks that no token reached the API or worker logs
 
 CI runs 1-4 on every push and pull request.
 
@@ -104,6 +105,8 @@ code on purpose and confirming they fail (mutation testing):
 | Notification insert without `ON CONFLICT DO NOTHING` | redelivery test (consumer not idempotent) |
 | No rollback of a failed handler's writes | retry test (the failed attempt's write survived) |
 | Outbox event written for failed payments too | event test (an event for money that never moved) |
+| Notifications query without `WHERE user_id = $1` | notifications endpoint test (users would see each other's notifications) |
+| Notifications cursor without the `id` tie-breaker | notifications tie test (returned 1 of 5) |
 | Worker query without `SKIP LOCKED` | competing-workers test (workers queue behind one lock instead of taking different events) |
 
 One lesson is recorded in [ADR 0003](decisions/0003-idempotency-claim-inside-the-transaction.md):
